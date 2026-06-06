@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\app\")",
+      "Bash(Out-Null)",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\services\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\storage\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\models\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\scripts\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\config\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\sersu\\\\Desktop\\\\dima bot\\\\data\\\\images\")",
+      "Bash(Write-Output \"Directories created\")",
+      "Bash(mkdir -p \"/mnt/c/Users/sersu/Desktop/dima bot/app\" \"/mnt/c/Users/sersu/Desktop/dima bot/services\" \"/mnt/c/Users/sersu/Desktop/dima bot/storage\" \"/mnt/c/Users/sersu/Desktop/dima bot/models\" \"/mnt/c/Users/sersu/Desktop/dima bot/scripts\" \"/mnt/c/Users/sersu/Desktop/dima bot/config\" \"/mnt/c/Users/sersu/Desktop/dima bot/data/images\" && echo \"OK\")"
+    ]
+  }
+}
