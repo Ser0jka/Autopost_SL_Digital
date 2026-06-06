@@ -51,6 +51,20 @@ async def publish_vk_photo_post(image_path: str, caption: str) -> int:
         return int(post_id)
 
 
+async def publish_vk_text_post(caption: str) -> int:
+    config = get_config()
+    if not _vk_access_token():
+        raise VKPublishError("VK_USER_ACCESS_TOKEN or VK_ACCESS_TOKEN is not set")
+    if not config.VK_GROUP_ID:
+        raise VKPublishError("VK_GROUP_ID is not set")
+
+    owner_id = -abs(int(config.VK_GROUP_ID))
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        post_id = await _wall_post(client, owner_id, caption, "")
+        logger.info("Published VK text post %s", post_id)
+        return int(post_id)
+
+
 async def _vk_method(client: httpx.AsyncClient, method: str, data: dict[str, Any]) -> Any:
     config = get_config()
     payload = {
@@ -128,16 +142,14 @@ async def _wall_post(
     caption: str,
     attachment: str,
 ) -> int:
-    response = await _vk_method(
-        client,
-        "wall.post",
-        {
-            "owner_id": owner_id,
-            "from_group": 1,
-            "message": caption,
-            "attachments": attachment,
-        },
-    )
+    data = {
+        "owner_id": owner_id,
+        "from_group": 1,
+        "message": caption,
+    }
+    if attachment:
+        data["attachments"] = attachment
+    response = await _vk_method(client, "wall.post", data)
     post_id = response.get("post_id")
     if not post_id:
         raise VKPublishError(f"VK did not return post_id: {response}")

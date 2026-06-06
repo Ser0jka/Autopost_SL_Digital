@@ -2,6 +2,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
@@ -12,6 +13,14 @@ BRAND_CONTEXT_PATH = BASE_DIR / "config" / "brand_context.json"
 RUBRICS_PATH = BASE_DIR / "config" / "rubrics.json"
 RUBRIC_SCHEDULE_PATH = BASE_DIR / "config" / "rubric_schedule.json"
 
+FREE_LLM_MODEL_POOL = [
+    "openai/gpt-oss-120b:free",
+    "poolside/laguna-m.1:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/owl-alpha",
+    "openrouter/free",
+]
+
 ABSOLUTE_CAPTION_MAX = 950
 REGULAR_CAPTION_MIN = 500
 REGULAR_CAPTION_MAX = 900
@@ -19,6 +28,29 @@ MEME_CAPTION_MIN = 250
 MEME_CAPTION_MAX = 500
 
 VALID_PLACEHOLDERS = {
+    "{{nut}}",
+    "{{waynut}}",
+    "{{money}}",
+    "{{question}}",
+    "{{check}}",
+    "{{cross}}",
+    "{{heart}}",
+    "{{star}}",
+    "{{growth}}",
+    "{{like}}",
+    "{{dot}}",
+    "{{one}}",
+    "{{two}}",
+    "{{three}}",
+    "{{four}}",
+    "{{five}}",
+    "{{terminal}}",
+    "{{note}}",
+    "{{bolt}}",
+    "{{tools}}",
+    "{{idea}}",
+    "{{down}}",
+    "{{gift}}",
     "{{rocket}}",
     "{{fire}}",
     "{{robot}}",
@@ -28,6 +60,16 @@ VALID_PLACEHOLDERS = {
     "{{chart}}",
     "{{gear}}",
 }
+
+UNICODE_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U00002600-\U000026FF"
+    "\uFE0F"
+    "\u20E3"
+    "]+"
+)
 
 IMAGE_PROMPT_TEMPLATE = """Create a 16:9 cover image for a Telegram post in one consistent modern brand style.
 Image style: premium 3D render, clean digital / AI / startup style, soft studio lighting, neat volumetric shapes, minimalism, expensive technological visual, smooth abstract background waves, clean composition, lots of free space, depth, soft shadows, high quality.
@@ -52,22 +94,185 @@ class TextGenerator:
         self.rubrics = json.loads(RUBRICS_PATH.read_text(encoding="utf-8"))
         self.rubric_schedule = json.loads(RUBRIC_SCHEDULE_PATH.read_text(encoding="utf-8"))
 
-    async def generate_post_text(self, rubric_id: str, recent_posts: list[dict]) -> dict:
+    async def generate_post_text(
+        self,
+        rubric_id: str,
+        recent_posts: list[dict],
+        custom_topic: str = "",
+    ) -> dict:
         rubric = self.rubrics.get(rubric_id)
         if not rubric:
             raise TextGenerationError(f"Unknown rubric: {rubric_id}")
 
         recent_topics = [p.get("topic", "") for p in recent_posts if p.get("topic")]
-        prompt = self._build_prompt(rubric_id, rubric, recent_topics)
-        raw = await self._call_llm(prompt)
-        return self._parse_and_validate(raw, rubric_id)
+        prompt = self._build_prompt(rubric_id, rubric, recent_topics, custom_topic=custom_topic)
+        return await self._call_and_parse_with_model_pool(prompt, rubric_id)
 
-    def _build_prompt(self, rubric_id: str, rubric: dict, recent_topics: list[str]) -> str:
+    async def revise_post_text(
+        self,
+        rubric_id: str,
+        post: dict,
+        revision_request: str,
+    ) -> dict:
+        rubric = self.rubrics.get(rubric_id)
+        if not rubric:
+            raise TextGenerationError(f"Unknown rubric: {rubric_id}")
+
+        prompt = self._build_prompt(
+            rubric_id,
+            rubric,
+            recent_topics=[],
+            custom_topic=post.get("topic", ""),
+            revision_request=revision_request,
+            old_post=post,
+        )
+        return await self._call_and_parse_with_model_pool(prompt, rubric_id)
+
+    async def _call_and_parse_with_model_pool(self, prompt: str, rubric_id: str) -> dict:
+        errors: list[str] = []
+        for model in self._model_pool():
+            try:
+                raw = await self._call_llm(prompt, model)
+                result = self._parse_and_validate(raw, rubric_id)
+                result["_llm_model"] = model
+                logger.info("Text generated with LLM model: %s", model)
+                return result
+            except Exception as exc:
+                logger.warning("LLM model failed: %s: %s", model, exc)
+                errors.append(f"{model}: {exc}")
+
+        detail = "; ".join(errors)
+        raise TextGenerationError(f"All text LLM models failed: {detail}")
+
+    async def plan_constructor_cover(
+        self,
+        post: dict,
+        available_icons: list[str],
+        request: str = "",
+    ) -> dict:
+        if not available_icons:
+            raise TextGenerationError("No constructor icons found")
+
+        prompt = f"""Подбери параметры для локального конструктора обложки Waynut.
+
+Доступные иконки, выбери строго одну из списка:
+{", ".join(available_icons)}
+
+Пост:
+topic: {post.get("topic", "")}
+caption:
+{post.get("caption", "")}
+
+Дополнительный запрос админа:
+{request or "нет"}
+
+Верни только JSON:
+{{
+  "icon": "одно имя из списка без .png",
+  "title": "короткий заголовок обложки до 32 символов",
+  "subtitle": "подзаголовок до 56 символов"
+}}
+
+Правила:
+- title должен отражать суть поста и быть читаемым на картинке.
+- subtitle должен раскрывать пользу или конкретику.
+- не используй кавычки, хэштеги и эмодзи в title/subtitle.
+- если тема про продажи или заявки, чаще подходят sales, piplines, handshake.
+- если тема про AI или ботов, чаще подходят ai, idea-bot.
+- если тема про разработку, backend, код или архитектуру, чаще подходят program-monitor, vs-code, servers.
+- если тема про сбои или проблемы, чаще подходят wifi-off, servers.
+"""
+
+        errors: list[str] = []
+        for model in self._model_pool():
+            try:
+                raw = await self._call_llm(prompt, model)
+                result = self._parse_json(raw)
+                icon = str(result.get("icon", "")).strip()
+                if icon not in available_icons:
+                    raise TextGenerationError(f"LLM chose unknown icon: {icon}")
+                title = self._clean_cover_text(str(result.get("title", "")), 42)
+                subtitle = self._clean_cover_text(str(result.get("subtitle", "")), 70)
+                if not title:
+                    raise TextGenerationError("LLM returned empty title")
+                return {"icon": icon, "title": title, "subtitle": subtitle}
+            except Exception as exc:
+                logger.warning("Constructor cover planner failed: %s: %s", model, exc)
+                errors.append(f"{model}: {exc}")
+
+        logger.warning("All constructor planner models failed: %s", "; ".join(errors))
+        return self._fallback_constructor_plan(post, available_icons)
+
+    def _model_pool(self) -> list[str]:
+        primary_model = (self.config.TEXT_LLM_MODEL or "").strip()
+        if primary_model and primary_model not in FREE_LLM_MODEL_POOL:
+            models = [primary_model, *FREE_LLM_MODEL_POOL]
+        else:
+            models = [*FREE_LLM_MODEL_POOL]
+        seen = set()
+        result = []
+        for model in models:
+            model = (model or "").strip()
+            if model and model not in seen:
+                seen.add(model)
+                result.append(model)
+        return result
+
+    def _fallback_constructor_plan(self, post: dict, available_icons: list[str]) -> dict:
+        text = f"{post.get('topic', '')} {post.get('caption', '')}".lower()
+        rules = [
+            (("продаж", "заяв", "лид", "ворон"), "sales"),
+            (("crm", "pipeline", "ворон"), "piplines"),
+            (("бот", "ai", "нейро", "автомат"), "idea-bot"),
+            (("код", "backend", "архитект", "разработ"), "program-monitor"),
+            (("сервер", "систем", "инфраструкт"), "servers"),
+            (("ошиб", "сбой", "не работает"), "wifi-off"),
+            (("иде", "концепц"), "ai"),
+        ]
+        icon = available_icons[0]
+        for keywords, candidate in rules:
+            if candidate in available_icons and any(keyword in text for keyword in keywords):
+                icon = candidate
+                break
+        title = self._clean_cover_text(str(post.get("topic", "")), 42) or "IT без хаоса"
+        return {"icon": icon, "title": title, "subtitle": "Решение для роста бизнеса"}
+
+    def _clean_cover_text(self, text: str, limit: int) -> str:
+        text = re.sub(r"[#\"'`*_{}\[\]]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= limit:
+            return text
+        cut = text[: limit - 1].rfind(" ")
+        if cut < limit // 2:
+            cut = limit - 1
+        return text[:cut].rstrip(".,:;") + "…"
+
+    def _build_prompt(
+        self,
+        rubric_id: str,
+        rubric: dict,
+        recent_topics: list[str],
+        custom_topic: str = "",
+        revision_request: str = "",
+        old_post: Optional[dict] = None,
+    ) -> str:
         b = self.brand
         is_meme = rubric_id == "meme"
         min_len = MEME_CAPTION_MIN if is_meme else REGULAR_CAPTION_MIN
         max_len = MEME_CAPTION_MAX if is_meme else REGULAR_CAPTION_MAX
         recent_str = "\n".join(f"- {topic}" for topic in recent_topics[-20:]) or "нет"
+        topic_block = f"\nТема от админа: {custom_topic}\n" if custom_topic else ""
+        revision_block = ""
+        if revision_request and old_post:
+            revision_block = f"""
+Доработка существующего поста.
+Запрос админа: {revision_request}
+Старый topic: {old_post.get("topic", "")}
+Старый caption:
+{old_post.get("caption", "")}
+
+Сделай новую версию. Можно изменить caption, topic и метафору для картинки, если запрос этого требует.
+"""
 
         return f"""Ты контент-менеджер агентства {b["brand_name"]}.
 Пиши для Telegram-канала. Пост будет опубликован одним сообщением: картинка и caption под ней.
@@ -90,13 +295,22 @@ class TextGenerator:
 
 Недавние темы, их нельзя повторять:
 {recent_str}
+{topic_block}
+{revision_block}
 
 Требования:
 - Верни только валидный JSON без markdown.
 - Поле caption: {min_len}-{max_len} символов.
 - Абсолютный максимум caption: {ABSOLUTE_CAPTION_MAX} символов.
 - Для premium emoji используй только эти placeholders: {", ".join(sorted(VALID_PLACEHOLDERS))}.
-- Используй 1-3 placeholders, не придумывай другие.
+- Не используй обычные Unicode emoji вообще. Только placeholders для premium emoji. Если подходящего placeholder нет, пиши без emoji.
+- Используй 3-7 placeholders, но не перегружай текст.
+- Для форматирования используй только HTML-теги: <b>жирный</b>, <i>курсив</i>, <u>подчеркнутый</u>, <s>зачеркнутый</s>, <code>код</code>, <blockquote>цитата</blockquote>.
+- Не используй Markdown-оформление: **жирный**, __жирный__, `код`, > цитата.
+- Оформляй caption красиво для Telegram: сильный первый хук, короткие абзацы, 2-4 смысловых блока, можно список из 3-5 пунктов.
+- Первый хук чаще выделяй через <b>...</b>. Короткую важную мысль можно оформить через <blockquote>...</blockquote>.
+- Для списков используй placeholders {{one}}, {{two}}, {{three}}, {{four}}, {{five}} или акцентные markers {{check}}, {{dot}}, {{growth}}.
+- В конце добавляй мягкий CTA Waynut: @Waynut_Contact, сообщения каналу или info@waynut.ru, когда это уместно.
 - Не пиши отдельное поле с текстом поста, только caption.
 - image_prompt должен быть короткой темой/метафорой для обложки, а не полным техническим промптом.
 - В image_prompt опиши, что именно должен символизировать главный 3D-объект.
@@ -107,14 +321,23 @@ class TextGenerator:
   "caption": "готовый caption для Telegram",
   "image_prompt": "тема и метафора для обложки, 1-2 предложения",
   "premium_emoji_plan": [
-    {{"placeholder": "{{{{rocket}}}}", "meaning": "рост"}}
+    {{"placeholder": "{{{{nut}}}}", "meaning": "бренд Waynut"}},
+    {{"placeholder": "{{{{check}}}}", "meaning": "результат"}}
   ],
   "short_summary": "1-2 предложения о посте"
 }}"""
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, model: str) -> str:
         if not self.config.TEXT_LLM_API_KEY:
             raise TextGenerationError("TEXT_LLM_API_KEY not set")
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.8,
+            "max_tokens": 1800,
+            "response_format": {"type": "json_object"},
+        }
 
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
@@ -123,14 +346,24 @@ class TextGenerator:
                     "Authorization": f"Bearer {self.config.TEXT_LLM_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.config.TEXT_LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.8,
-                    "max_tokens": 1800,
-                },
+                json=payload,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                if response.status_code != 400:
+                    raise
+                logger.warning("LLM rejected response_format, retrying without JSON mode: %s", response.text[:500])
+                payload.pop("response_format", None)
+                response = await client.post(
+                    f"{self.config.TEXT_LLM_BASE_URL.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.config.TEXT_LLM_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
 
         data = response.json()
         try:
@@ -180,6 +413,7 @@ class TextGenerator:
 
     def _normalize_caption(self, caption: str, rubric_id: str) -> str:
         caption = self._sanitize_placeholders(caption.strip())
+        caption = self._strip_unicode_emoji(caption)
         max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
         hard_max = min(max_len, ABSOLUTE_CAPTION_MAX)
 
@@ -191,6 +425,9 @@ class TextGenerator:
             caption = self._truncate(caption, ABSOLUTE_CAPTION_MAX)
 
         return caption
+
+    def _strip_unicode_emoji(self, text: str) -> str:
+        return UNICODE_EMOJI_RE.sub("", text)
 
     def _truncate(self, text: str, limit: int) -> str:
         if len(text) <= limit:
@@ -208,11 +445,38 @@ class TextGenerator:
         start, end = text.find("{"), text.rfind("}") + 1
         if start == -1 or end == 0:
             raise ValueError("No JSON object found")
-        return json.loads(text[start:end])
+        json_text = text[start:end]
+        try:
+            return json.loads(json_text, strict=False)
+        except json.JSONDecodeError:
+            return json.loads(self._escape_control_chars_in_strings(json_text), strict=False)
 
     def _fix_json(self, text: str) -> str:
         text = re.sub(r",\s*}", "}", text)
         return re.sub(r",\s*]", "]", text)
+
+    def _escape_control_chars_in_strings(self, text: str) -> str:
+        result = []
+        in_string = False
+        escaped = False
+        for char in text:
+            if escaped:
+                result.append(char)
+                escaped = False
+                continue
+            if char == "\\":
+                result.append(char)
+                escaped = True
+                continue
+            if char == '"':
+                result.append(char)
+                in_string = not in_string
+                continue
+            if in_string and char in {"\n", "\r", "\t"}:
+                result.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[char])
+                continue
+            result.append(char)
+        return "".join(result)
 
     def _sanitize_placeholders(self, text: str) -> str:
         def replace(match: re.Match) -> str:
