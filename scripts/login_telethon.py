@@ -1,8 +1,8 @@
 import asyncio
 import sys
 from pathlib import Path
-
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -15,14 +15,13 @@ async def main() -> None:
         raise RuntimeError("Set TELETHON_API_ID and TELETHON_API_HASH in .env first")
 
     client = TelegramClient(
-        config.TELETHON_SESSION_NAME,
-        config.TELETHON_API_ID,
-        config.TELETHON_API_HASH,
+        StringSession(), 
+        config.TELETHON_API_ID, 
+        config.TELETHON_API_HASH
     )
-
+    
     await client.start()
-    me = await client.get_me()
-    print(f"Telethon session is ready: {me.id} @{me.username or ''}".strip())
+    print(client.session.save())
     await client.disconnect()
 
 

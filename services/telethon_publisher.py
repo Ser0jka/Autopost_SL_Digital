@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.types import MessageEntityCustomEmoji
 
 from app.config import get_config
@@ -83,6 +84,13 @@ def render_plain_caption(caption: str) -> str:
     return text
 
 
+def telethon_session():
+    config = get_config()
+    if config.TELETHON_SESSION_STRING:
+        return StringSession(config.TELETHON_SESSION_STRING)
+    return config.TELETHON_SESSION_NAME
+
+
 async def publish_photo_post(channel: str, image_path: str, caption: str) -> int:
     config = get_config()
     if not config.TELETHON_API_ID or not config.TELETHON_API_HASH:
@@ -90,11 +98,7 @@ async def publish_photo_post(channel: str, image_path: str, caption: str) -> int
 
     caption_text, entities = build_caption_entities(caption)
 
-    client = TelegramClient(
-        config.TELETHON_SESSION_NAME,
-        config.TELETHON_API_ID,
-        config.TELETHON_API_HASH,
-    )
+    client = TelegramClient(telethon_session(), config.TELETHON_API_ID, config.TELETHON_API_HASH)
 
     async with client:
         try:

@@ -22,6 +22,7 @@ class Config(BaseSettings):
     TELETHON_API_ID: int = 0
     TELETHON_API_HASH: str = ""
     TELETHON_SESSION_NAME: str = "sl_digital_user"
+    TELETHON_SESSION_STRING: str = ""
 
     HF_API_KEY: str = ""
     HF_MODEL: str = "black-forest-labs/FLUX.1-schnell"
