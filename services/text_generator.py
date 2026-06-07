@@ -61,6 +61,8 @@ VALID_PLACEHOLDERS = {
     "{{gear}}",
 }
 
+LIST_PLACEHOLDERS = ("one", "two", "three", "four", "five")
+
 UNICODE_EMOJI_RE = re.compile(
     "["
     "\U0001F000-\U0001FAFF"
@@ -130,16 +132,18 @@ class TextGenerator:
 
     async def _call_and_parse_with_model_pool(self, prompt: str, rubric_id: str) -> dict:
         errors: list[str] = []
-        for model in self._model_pool():
+        for route in self._llm_routes():
+            route_name = self._route_name(route)
             try:
-                raw = await self._call_llm(prompt, model)
+                raw = await self._call_llm(prompt, route)
                 result = self._parse_and_validate(raw, rubric_id)
-                result["_llm_model"] = model
-                logger.info("Text generated with LLM model: %s", model)
+                result["_llm_provider"] = route["provider"]
+                result["_llm_model"] = route["model"]
+                logger.info("Text generated with LLM route: %s", route_name)
                 return result
             except Exception as exc:
-                logger.warning("LLM model failed: %s: %s", model, exc)
-                errors.append(f"{model}: {exc}")
+                logger.warning("LLM route failed: %s: %s", route_name, exc)
+                errors.append(f"{route_name}: {exc}")
 
         detail = "; ".join(errors)
         raise TextGenerationError(f"All text LLM models failed: {detail}")
@@ -184,9 +188,10 @@ caption:
 """
 
         errors: list[str] = []
-        for model in self._model_pool():
+        for route in self._llm_routes():
+            route_name = self._route_name(route)
             try:
-                raw = await self._call_llm(prompt, model)
+                raw = await self._call_llm(prompt, route)
                 result = self._parse_json(raw)
                 icon = str(result.get("icon", "")).strip()
                 if icon not in available_icons:
@@ -197,13 +202,43 @@ caption:
                     raise TextGenerationError("LLM returned empty title")
                 return {"icon": icon, "title": title, "subtitle": subtitle}
             except Exception as exc:
-                logger.warning("Constructor cover planner failed: %s: %s", model, exc)
-                errors.append(f"{model}: {exc}")
+                logger.warning("Constructor cover planner failed: %s: %s", route_name, exc)
+                errors.append(f"{route_name}: {exc}")
 
         logger.warning("All constructor planner models failed: %s", "; ".join(errors))
         return self._fallback_constructor_plan(post, available_icons)
 
-    def _model_pool(self) -> list[str]:
+    def _llm_routes(self) -> list[dict[str, str]]:
+        routes: list[dict[str, str]] = []
+
+        if (self.config.GROQ_API_KEY or "").strip():
+            for model in self._split_models(self.config.GROQ_MODEL):
+                routes.append(
+                    {
+                        "provider": "groq",
+                        "base_url": self.config.GROQ_BASE_URL,
+                        "api_key": self.config.GROQ_API_KEY,
+                        "model": model,
+                    }
+                )
+
+        if (self.config.TEXT_LLM_API_KEY or "").strip():
+            for model in self._openrouter_model_pool():
+                routes.append(
+                    {
+                        "provider": "openrouter",
+                        "base_url": self.config.TEXT_LLM_BASE_URL,
+                        "api_key": self.config.TEXT_LLM_API_KEY,
+                        "model": model,
+                    }
+                )
+
+        if not routes:
+            raise TextGenerationError("GROQ_API_KEY or TEXT_LLM_API_KEY must be set")
+
+        return routes
+
+    def _openrouter_model_pool(self) -> list[str]:
         primary_model = (self.config.TEXT_LLM_MODEL or "").strip()
         if primary_model and primary_model not in FREE_LLM_MODEL_POOL:
             models = [primary_model, *FREE_LLM_MODEL_POOL]
@@ -217,6 +252,12 @@ caption:
                 seen.add(model)
                 result.append(model)
         return result
+
+    def _split_models(self, value: str) -> list[str]:
+        return [model.strip() for model in (value or "").split(",") if model.strip()]
+
+    def _route_name(self, route: dict[str, str]) -> str:
+        return f"{route['provider']}:{route['model']}"
 
     def _fallback_constructor_plan(self, post: dict, available_icons: list[str]) -> dict:
         text = f"{post.get('topic', '')} {post.get('caption', '')}".lower()
@@ -310,6 +351,16 @@ caption:
 - Оформляй caption красиво для Telegram: сильный первый хук, короткие абзацы, 2-4 смысловых блока, можно список из 3-5 пунктов.
 - Первый хук чаще выделяй через <b>...</b>. Короткую важную мысль можно оформить через <blockquote>...</blockquote>.
 - Для списков используй placeholders {{one}}, {{two}}, {{three}}, {{four}}, {{five}} или акцентные markers {{check}}, {{dot}}, {{growth}}.
+- Каждый пункт списка пиши строго с новой строки. Не пиши несколько пунктов в одной строке.
+- Перед списком и после списка ставь пустую строку.
+- Формат списка:
+  {{one}} первый пункт
+  {{two}} второй пункт
+  {{three}} третий пункт
+- Не используй обычные цифры 1, 2, 3 как маркеры списка, только placeholders.
+- После placeholder не ставь точку, двоеточие или тире. Пиши так: {{check}} текст пункта.
+- Пункты списка делай короткими: 3-9 слов на пункт, без длинных сложных предложений.
+- Не начинай CTA с {{dot}} или точки. CTA должен быть отдельным коротким абзацем.
 - В конце добавляй мягкий CTA Waynut: @Waynut_Contact, сообщения каналу или info@waynut.ru, когда это уместно.
 - Не пиши отдельное поле с текстом поста, только caption.
 - image_prompt должен быть короткой темой/метафорой для обложки, а не полным техническим промптом.
@@ -327,9 +378,12 @@ caption:
   "short_summary": "1-2 предложения о посте"
 }}"""
 
-    async def _call_llm(self, prompt: str, model: str) -> str:
-        if not self.config.TEXT_LLM_API_KEY:
-            raise TextGenerationError("TEXT_LLM_API_KEY not set")
+    async def _call_llm(self, prompt: str, route: dict[str, str]) -> str:
+        api_key = (route.get("api_key") or "").strip()
+        base_url = (route.get("base_url") or "").strip().rstrip("/")
+        model = (route.get("model") or "").strip()
+        if not api_key or not base_url or not model:
+            raise TextGenerationError(f"Invalid LLM route: {self._route_name(route)}")
 
         payload = {
             "model": model,
@@ -341,9 +395,9 @@ caption:
 
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
-                f"{self.config.TEXT_LLM_BASE_URL.rstrip('/')}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self.config.TEXT_LLM_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
@@ -356,9 +410,9 @@ caption:
                 logger.warning("LLM rejected response_format, retrying without JSON mode: %s", response.text[:500])
                 payload.pop("response_format", None)
                 response = await client.post(
-                    f"{self.config.TEXT_LLM_BASE_URL.rstrip('/')}/chat/completions",
+                    f"{base_url}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {self.config.TEXT_LLM_API_KEY}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json=payload,
@@ -414,6 +468,7 @@ caption:
     def _normalize_caption(self, caption: str, rubric_id: str) -> str:
         caption = self._sanitize_placeholders(caption.strip())
         caption = self._strip_unicode_emoji(caption)
+        caption = self._format_caption_layout(caption)
         max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
         hard_max = min(max_len, ABSOLUTE_CAPTION_MAX)
 
@@ -428,6 +483,38 @@ caption:
 
     def _strip_unicode_emoji(self, text: str) -> str:
         return UNICODE_EMOJI_RE.sub("", text)
+
+    def _format_caption_layout(self, text: str) -> str:
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\s*({{(?:one|two|three|four|five)}})\s+", r"\n\1 ", text)
+        text = re.sub(r"(?<!\n)\s+({{(?:check|dot|growth)}})\s+", r"\n\1 ", text)
+        text = re.sub(r"(?m)^({{(?:one|two|three|four|five|check|dot|growth)}})[ \t.,;:]+", r"\1 ", text)
+
+        lines = [line.strip() for line in text.splitlines()]
+        result: list[str] = []
+        previous_was_list = False
+
+        for line in lines:
+            if not line:
+                if result and result[-1] != "":
+                    result.append("")
+                previous_was_list = False
+                continue
+
+            line = re.sub(r"^[\s.,;:]+", "", line).strip()
+            is_list = bool(re.match(r"^{{(?:one|two|three|four|five|check|dot|growth)}}\s+", line))
+
+            if is_list and result and result[-1] != "" and not previous_was_list:
+                result.append("")
+            if not is_list and previous_was_list and result and result[-1] != "":
+                result.append("")
+
+            result.append(line)
+            previous_was_list = is_list
+
+        text = "\n".join(result)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     def _truncate(self, text: str, limit: int) -> str:
         if len(text) <= limit:

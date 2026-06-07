@@ -19,6 +19,10 @@ class Config(BaseSettings):
     TEXT_LLM_API_KEY: str = ""
     TEXT_LLM_MODEL: str = "google/gemma-3-27b-it:free"
 
+    GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
     TELETHON_API_ID: int = 0
     TELETHON_API_HASH: str = ""
     TELETHON_SESSION_NAME: str = "sl_digital_user"

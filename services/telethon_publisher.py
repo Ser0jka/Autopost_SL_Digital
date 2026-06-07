@@ -90,6 +90,14 @@ def _custom_emoji_config() -> dict:
     return json.loads(CUSTOM_EMOJI_PATH.read_text(encoding="utf-8"))
 
 
+def _clean_rendered_caption(text: str) -> str:
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"(?m)^[ \t.,;:]+", "", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _caption_entity(
     entity_type: type,
     offset: int,
@@ -175,7 +183,7 @@ def build_caption_entities(caption: str, *, include_custom_emoji: bool = True) -
 
 def render_plain_caption(caption: str) -> str:
     text, _entities = build_caption_entities(caption, include_custom_emoji=False)
-    return text
+    return _clean_rendered_caption(text)
 
 
 def render_preview_caption(caption: str) -> str:
@@ -186,7 +194,7 @@ def render_preview_caption(caption: str) -> str:
         placeholder = _normalize_placeholder_name(name)
         return CUSTOM_EMOJI_ALT.get(placeholder) or emoji_config.get(placeholder, {}).get("alt") or ""
 
-    return re.sub(r"\{\{(\w+)\}\}|\{(\w+)\}", replace, caption)
+    return _clean_rendered_caption(re.sub(r"\{\{(\w+)\}\}|\{(\w+)\}", replace, caption))
 
 
 def telethon_session():
