@@ -144,6 +144,24 @@ async def main() -> None:
             except Exception:
                 logger.exception("Failed to send preview to admin %s", admin_id)
 
+    async def build_constructor_image_for_post_data(
+        post_data: dict,
+        post_id: str,
+        request: str = "",
+    ) -> tuple[str, str]:
+        icons = list_constructor_icons()
+        if not icons:
+            raise RuntimeError("No PNG icons found in data/icons")
+
+        plan_data = await text_generator.plan_constructor_cover(post_data, icons, request=request)
+        plan = ConstructorPlan(
+            icon=plan_data["icon"],
+            title=plan_data["title"],
+            subtitle=plan_data.get("subtitle", ""),
+        )
+        image_path = build_constructor_image(post_id, plan)
+        return image_path, f"constructor:{plan.icon}"
+
     async def generate_post_for_review(
         rubric_id: str,
         requested_by_chat_id: int,
@@ -179,10 +197,37 @@ async def main() -> None:
             await bot.send_message(requested_by_chat_id, f"⚠️ Не удалось сгенерировать пост: {exc}")
             return None
 
+        draft_post_data = {
+            "id": post_id,
+            "rubric_id": rubric_id,
+            "topic": generated["topic"],
+            "caption": generated["caption"],
+            "image_prompt": generated["image_prompt"],
+        }
+        image_path = ""
+        image_provider = ""
+        image_error = ""
+
         try:
-            image = await image_generator.generate_image(generated["image_prompt"], post_id)
-        except ImageGenerationError as exc:
-            logger.exception("Image generation failed")
+            image_path, image_provider = await build_constructor_image_for_post_data(
+                draft_post_data,
+                post_id,
+            )
+        except Exception as exc:
+            logger.exception("Initial constructor image failed")
+            image_error = f"Constructor image failed: {exc}"
+
+        if not image_path:
+            try:
+                image = await image_generator.generate_image(generated["image_prompt"], post_id)
+                image_path = image.path
+                image_provider = image.provider
+                image_error = ""
+            except ImageGenerationError as exc:
+                logger.exception("Image generation failed")
+                image_error = f"Image generation failed: {exc}"
+
+        if not image_path:
             post = Post(
                 id=post_id,
                 created_at=now,
@@ -194,12 +239,12 @@ async def main() -> None:
                 image_path="",
                 image_provider="",
                 status="review",
-                error_message=f"Image generation failed: {exc}",
+                error_message=image_error,
             )
             storage.add_post(post)
             await bot.send_message(
                 requested_by_chat_id,
-                "⚠️ Картинку не удалось сгенерировать.\n"
+                "⚠️ Картинку не удалось собрать или сгенерировать.\n"
                 "Текст готов: можно опубликовать без фотографии или нажать «Добавить картинку» в preview.",
             )
             if announce_to_all:
@@ -216,8 +261,8 @@ async def main() -> None:
             topic=generated["topic"],
             caption=generated["caption"],
             image_prompt=generated["image_prompt"],
-            image_path=image.path,
-            image_provider=image.provider,
+            image_path=image_path,
+            image_provider=image_provider,
             status="review",
         )
         storage.add_post(post)
@@ -251,10 +296,37 @@ async def main() -> None:
             await bot.send_message(admin_chat_id, f"⚠️ Не удалось доработать текст: {exc}")
             return
 
+        revised_post_data = {
+            **old_post,
+            "topic": generated["topic"],
+            "caption": generated["caption"],
+            "image_prompt": generated["image_prompt"],
+        }
+        image_path = ""
+        image_provider = ""
+        image_error = ""
+
         try:
-            image = await image_generator.generate_image(generated["image_prompt"], post_id)
-        except ImageGenerationError as exc:
-            logger.exception("Revision image generation failed")
+            image_path, image_provider = await build_constructor_image_for_post_data(
+                revised_post_data,
+                post_id,
+                request=revision_request,
+            )
+        except Exception as exc:
+            logger.exception("Revision constructor image failed")
+            image_error = f"Revision constructor image failed: {exc}"
+
+        if not image_path:
+            try:
+                image = await image_generator.generate_image(generated["image_prompt"], post_id)
+                image_path = image.path
+                image_provider = image.provider
+                image_error = ""
+            except ImageGenerationError as exc:
+                logger.exception("Revision image generation failed")
+                image_error = f"Revision image generation failed: {exc}"
+
+        if not image_path:
             storage.update_post(
                 post_id,
                 {
@@ -264,12 +336,12 @@ async def main() -> None:
                     "image_path": "",
                     "image_provider": "",
                     "status": "review",
-                    "error_message": f"Revision image generation failed: {exc}",
+                    "error_message": image_error,
                 },
             )
             await bot.send_message(
                 admin_chat_id,
-                "⚠️ Текст доработал, но новую картинку сгенерировать не удалось. Отправляю preview без фотографии.",
+                "⚠️ Текст доработал, но новую картинку собрать или сгенерировать не удалось. Отправляю preview без фотографии.",
             )
             updated_post = storage.get_post(post_id)
             if updated_post:
@@ -283,8 +355,8 @@ async def main() -> None:
                 "topic": generated["topic"],
                 "caption": generated["caption"],
                 "image_prompt": generated["image_prompt"],
-                "image_path": image.path,
-                "image_provider": image.provider,
+                "image_path": image_path,
+                "image_provider": image_provider,
                 "status": "review",
                 "error_message": "",
             },
@@ -307,29 +379,45 @@ async def main() -> None:
             return
 
         request = image_request.strip()
-        if request.lower() in {"оставь", "оставить", "как есть", "-"}:
-            image_prompt = post.image_prompt
-        else:
-            image_prompt = text_generator._build_image_prompt(request)
+        keep_current_prompt = request.lower() in {"оставь", "оставить", "как есть", "-"}
+        image_prompt = post.image_prompt if keep_current_prompt else text_generator._build_image_prompt(request)
+        constructor_request = "" if keep_current_prompt else request
 
-        await bot.send_message(admin_chat_id, "Генерирую картинку для поста...")
+        await bot.send_message(admin_chat_id, "Сначала собираю картинку-конструктор для поста...")
+        image_path = ""
+        image_provider = ""
         try:
-            image = await image_generator.generate_image(image_prompt, post_id)
-        except ImageGenerationError as exc:
-            logger.exception("Manual image generation failed")
-            storage.update_post(post_id, {"error_message": f"Manual image generation failed: {exc}"})
-            await bot.send_message(
-                admin_chat_id,
-                "⚠️ Картинку снова не удалось сгенерировать. Пост можно опубликовать без фотографии.",
+            post_data = {**post.__dict__, "image_prompt": image_prompt}
+            image_path, image_provider = await build_constructor_image_for_post_data(
+                post_data,
+                post_id,
+                request=constructor_request,
             )
-            return
+        except Exception as exc:
+            logger.exception("Manual constructor image failed")
+            storage.update_post(post_id, {"error_message": f"Manual constructor image failed: {exc}"})
+
+        if not image_path:
+            await bot.send_message(admin_chat_id, "Конструктор не справился, пробую AI-генерацию картинки...")
+            try:
+                image = await image_generator.generate_image(image_prompt, post_id)
+                image_path = image.path
+                image_provider = image.provider
+            except ImageGenerationError as exc:
+                logger.exception("Manual image generation failed")
+                storage.update_post(post_id, {"error_message": f"Manual image generation failed: {exc}"})
+                await bot.send_message(
+                    admin_chat_id,
+                    "⚠️ Картинку снова не удалось собрать или сгенерировать. Пост можно опубликовать без фотографии.",
+                )
+                return
 
         storage.update_post(
             post_id,
             {
                 "image_prompt": image_prompt,
-                "image_path": image.path,
-                "image_provider": image.provider,
+                "image_path": image_path,
+                "image_provider": image_provider,
                 "status": "review",
                 "error_message": "",
             },
@@ -395,28 +483,27 @@ async def main() -> None:
             await bot.send_message(admin_chat_id, "Этот пост уже отклонен, картинку менять нельзя.")
             return
 
-        icons = list_constructor_icons()
-        if not icons:
-            await bot.send_message(admin_chat_id, "В data/icons нет PNG-иконок для конструктора.")
-            return
-
         await bot.send_message(
             admin_chat_id,
             "Собираю картинку-конструктор: выбираю иконку, заголовок и подзаголовок...",
         )
-        plan_data = await text_generator.plan_constructor_cover(post.__dict__, icons, request=request)
-        plan = ConstructorPlan(
-            icon=plan_data["icon"],
-            title=plan_data["title"],
-            subtitle=plan_data.get("subtitle", ""),
-        )
-        image_path = build_constructor_image(post_id, plan)
+        try:
+            image_path, image_provider = await build_constructor_image_for_post_data(
+                post.__dict__,
+                post_id,
+                request=request,
+            )
+        except Exception as exc:
+            logger.exception("Constructor image failed")
+            storage.update_post(post_id, {"error_message": f"Constructor image failed: {exc}"})
+            await bot.send_message(admin_chat_id, f"⚠️ Не удалось собрать картинку-конструктор: {exc}")
+            return
 
         storage.update_post(
             post_id,
             {
                 "image_path": image_path,
-                "image_provider": f"constructor:{plan.icon}",
+                "image_provider": image_provider,
                 "status": "review",
                 "error_message": "",
             },
@@ -424,7 +511,7 @@ async def main() -> None:
         updated_post = storage.get_post(post_id)
         if updated_post:
             await notify_admins(
-                f"🧩 Собрана картинка-конструктор для поста {post_id}: {plan.icon}. Новый preview ниже."
+                f"🧩 Собрана картинка-конструктор для поста {post_id}. Новый preview ниже."
             )
             await send_preview_to_admins(updated_post)
 
@@ -555,6 +642,7 @@ async def main() -> None:
             current = "изменить" if post.image_path else "добавить"
             await callback.message.answer(
                 f"🖼 Напиши, какую картинку {current} для поста {post_id}.\n"
+                "Сначала соберу картинку-конструктор, если не получится - попробую AI-генерацию.\n"
                 "Например: 3D-воронка продаж с чат-ботом и CRM.\n"
                 "Или пришли свою картинку с устройства как фото/файл.\n"
                 "Можно написать «оставь», чтобы попробовать текущий image_prompt еще раз."

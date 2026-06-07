@@ -2,7 +2,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def get_approval_keyboard(post_id: str, has_image: bool = True) -> InlineKeyboardMarkup:
-    image_button_text = "🖼 Изменить картинку" if has_image else "🖼 Добавить картинку"
+    image_button_text = "🧩 Изменить картинку" if has_image else "🧩 Добавить картинку"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [

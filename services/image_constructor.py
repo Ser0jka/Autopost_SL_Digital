@@ -180,7 +180,7 @@ def _wrap_text(
     if len(lines) > max_lines:
         lines = lines[:max_lines]
     if len(lines) == max_lines and len(" ".join(words)) > len(" ".join(lines)):
-        lines[-1] = lines[-1].rstrip(".,:;") + "..."
+        lines[-1] = lines[-1].rstrip(".,:;")
     return lines or ["IT без хаоса"]
 
 

@@ -22,10 +22,15 @@ FREE_LLM_MODEL_POOL = [
 ]
 
 ABSOLUTE_CAPTION_MAX = 950
-REGULAR_CAPTION_MIN = 500
+REGULAR_CAPTION_MIN = 700
 REGULAR_CAPTION_MAX = 900
-MEME_CAPTION_MIN = 250
+MEME_CAPTION_MIN = 350
 MEME_CAPTION_MAX = 500
+
+EDITORIAL_SYSTEM_PROMPT = """Ты сильный русскоязычный редактор Telegram-канала IT-агентства.
+Твоя задача - писать живые, профессиональные посты, которые читаются как работа практикующей команды, а не как SEO-дайджест или корпоративная заготовка.
+Пиши конкретно: ситуация, действие, причина, результат. Убирай общие слова, если их нельзя проверить на реальном проекте.
+Сохраняй разметку и placeholders строго по пользовательскому заданию."""
 
 VALID_PLACEHOLDERS = {
     "{{nut}}",
@@ -62,6 +67,63 @@ VALID_PLACEHOLDERS = {
 }
 
 LIST_PLACEHOLDERS = ("one", "two", "three", "four", "five")
+
+WEAK_CAPTION_PHRASES = (
+    "эффективного управления",
+    "наша команда имеет опыт",
+    "комплексных it-решений",
+    "это не только технологии",
+    "важно правильно выбрать",
+    "может помочь вашему бизнесу",
+    "для вашего бизнеса",
+    "реальные бизнес-задачи",
+    "повысить эффективность",
+    "оптимизировать процессы",
+    "современные технологии",
+    "индивидуальный подход",
+    "качественные решения",
+)
+
+HARD_WEAK_CAPTION_PHRASES = (
+    "мы собрали для вас",
+    "ключевых мысл",
+    "ключевых вывод",
+    "бизнесы часто сталкиваются",
+    "it-решения могут помочь",
+    "дайджест из главных",
+    "в современном мире",
+    "в наше время",
+    "сегодня бизнесу важно",
+)
+
+SPECIFICITY_MARKERS = (
+    "mvp",
+    "crm",
+    "api",
+    "бот",
+    "заяв",
+    "лид",
+    "прототип",
+    "метрик",
+    "гипотез",
+    "интеграц",
+    "воронк",
+    "сценари",
+    "данн",
+    "сайт",
+    "форм",
+    "менеджер",
+    "клиент",
+    "час",
+    "день",
+    "недел",
+    "тест",
+    "мокап",
+    "админ",
+    "кабинет",
+    "сервер",
+    "автоматизац",
+)
 
 UNICODE_EMOJI_RE = re.compile(
     "["
@@ -281,12 +343,13 @@ caption:
     def _clean_cover_text(self, text: str, limit: int) -> str:
         text = re.sub(r"[#\"'`*_{}\[\]]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
+        text = self._remove_ellipsis(text)
         if len(text) <= limit:
             return text
         cut = text[: limit - 1].rfind(" ")
         if cut < limit // 2:
             cut = limit - 1
-        return text[:cut].rstrip(".,:;") + "…"
+        return text[:cut].rstrip(".,:;")
 
     def _build_prompt(
         self,
@@ -342,14 +405,26 @@ caption:
 Требования:
 - Верни только валидный JSON без markdown.
 - Поле caption: {min_len}-{max_len} символов.
+- Целевой объем caption для обычных рубрик: 750-900 символов. Для meme: 350-500 символов.
+- Не делай короткий пост: лучше 3-4 содержательных абзаца и список, чем 1-2 общие фразы.
 - Абсолютный максимум caption: {ABSOLUTE_CAPTION_MAX} символов.
+- Пиши как человек из команды, который реально разбирает рабочую ситуацию. Не пиши как нейросеть, пресс-релиз, SEO-текст или "дайджест из главных выводов".
+- В каждом посте должна быть конкретика: сценарий, процесс, решение, критерий, ошибка, метрика, ограничение или практический вывод. Общие фразы без действия запрещены.
+- Не начинай с "Мы собрали", "Внедрение IT-решений - это", "5 ключевых мыслей", "IT-решения помогают бизнесу". Это звучит скудно.
+- Не используй формулировки "бизнесы часто сталкиваются", "наша команда имеет опыт", "важно правильно выбрать технологии", если дальше нет конкретного действия или примера.
+- Перед написанием внутренне выбери один угол поста: рабочий процесс, ошибка клиента, запуск MVP, автоматизация заявки, интеграция CRM, снижение ручной работы, проверка гипотезы, метрика, ограничение проекта. В JSON этот угол отдельно не выводи, но весь caption строй вокруг него.
+- В тексте должен быть хотя бы один конкретный артефакт: прототип, API, CRM, форма заявки, бот, кабинет, метрика, мокап, сценарий пользователя, интеграция, таблица, воронка, заявка, менеджер.
+- Не перечисляй абстрактные преимущества. Покажи, что именно команда делает руками и зачем.
+- Пиши фразами средней длины. Не делай подряд 5 коротких лозунгов и не делай длинные канцелярские предложения.
+- Не используй многоточия вообще и не ставь три точки подряд. Каждый абзац должен выглядеть завершенным.
 - Для premium emoji используй только эти placeholders: {", ".join(sorted(VALID_PLACEHOLDERS))}.
 - Не используй обычные Unicode emoji вообще. Только placeholders для premium emoji. Если подходящего placeholder нет, пиши без emoji.
 - Используй 3-7 placeholders, но не перегружай текст.
 - Для форматирования используй только HTML-теги: <b>жирный</b>, <i>курсив</i>, <u>подчеркнутый</u>, <s>зачеркнутый</s>, <code>код</code>, <blockquote>цитата</blockquote>.
 - Не используй Markdown-оформление: **жирный**, __жирный__, `код`, > цитата.
-- Оформляй caption красиво для Telegram: сильный первый хук, короткие абзацы, 2-4 смысловых блока, можно список из 3-5 пунктов.
-- Первый хук чаще выделяй через <b>...</b>. Короткую важную мысль можно оформить через <blockquote>...</blockquote>.
+- Оформляй caption красиво для Telegram: сильный первый хук, короткие абзацы, 3-4 смысловых блока, список из 3-4 пунктов, короткий вывод и мягкий CTA.
+- Первый хук выделяй через <b>текст хука</b>. Внутри хука должна быть конкретная идея, а не название темы.
+- Короткую важную мысль оформляй через <blockquote>текст вывода</blockquote>. Цитата должна быть не длиннее 120 символов.
 - Для списков используй placeholders {{one}}, {{two}}, {{three}}, {{four}}, {{five}} или акцентные markers {{check}}, {{dot}}, {{growth}}.
 - Каждый пункт списка пиши строго с новой строки. Не пиши несколько пунктов в одной строке.
 - Перед списком и после списка ставь пустую строку.
@@ -365,6 +440,44 @@ caption:
 - Не пиши отдельное поле с текстом поста, только caption.
 - image_prompt должен быть короткой темой/метафорой для обложки, а не полным техническим промптом.
 - В image_prompt опиши, что именно должен символизировать главный 3D-объект.
+
+Редакционный каркас для обычных рубрик:
+1. <b>Хук</b>: конкретный тезис или рабочая ситуация.
+2. Абзац контекста: что происходит в бизнесе/проекте и почему это важно.
+3. Список: 3-4 практических шага, решения или наблюдения.
+4. <blockquote>Короткий вывод</blockquote>
+5. Финальный абзац: что получает бизнес / как Waynut подходит к задаче.
+6. CTA: коротко, без давления.
+
+Выбирай одну из композиционных формул:
+- "ситуация -> как делаем -> почему так -> результат";
+- "ошибка -> чем опасна -> как исправить -> что проверить";
+- "гипотеза -> быстрый прототип -> тест -> решение";
+- "хаос в процессе -> связка инструментов -> прозрачная воронка";
+- "ручная работа -> автоматизация -> контроль -> экономия времени".
+
+Перед финальным JSON мысленно проверь caption:
+- есть ли живой хук, который хочется дочитать;
+- есть ли конкретный проектный процесс, а не общие обещания;
+- список стоит столбиком;
+- quote звучит как вывод, а не как рекламный слоган;
+- CTA не давит и не повторяет весь пост;
+- текст похож на пост опытной команды Waynut.
+
+Пример уровня оформления и живости, к которому нужно стремиться:
+<b>Тестируем MVP за 72 часа - как это реально?</b>
+
+Сначала собираем гипотезы и формируем минимальный набор функций. Затем в команде делим задачи:
+
+{{one}} дизайн-прототип за 6 часов
+{{two}} backend-мокап без полной инфраструктуры
+{{three}} юзабилити-тесты на реальных сценариях
+
+<blockquote>Минимум кода - максимум обратной связи.</blockquote>
+
+Так за 3 дня появляется не "красивая идея", а набор метрик: что подтвердилось, где пользователю непонятно и что стоит дорабатывать дальше.
+
+Готовы проверить идею в таком темпе? Напишите @Waynut_Contact или info@waynut.ru.
 
 Верни JSON строго такой формы:
 {{
@@ -387,8 +500,11 @@ caption:
 
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.8,
+            "messages": [
+                {"role": "system", "content": EDITORIAL_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.9,
             "max_tokens": 1800,
             "response_format": {"type": "json_object"},
         }
@@ -454,6 +570,8 @@ caption:
 
         result["topic"] = str(result["topic"]).strip()[:80]
         result["caption"] = self._normalize_caption(str(result["caption"]), rubric_id)
+        self._validate_caption_length(result["caption"], rubric_id)
+        self._validate_caption_quality(result["caption"], rubric_id)
         result["image_prompt"] = self._build_image_prompt(str(result["image_prompt"]).strip())
         result.setdefault("premium_emoji_plan", [])
         result.setdefault("short_summary", "")
@@ -468,6 +586,7 @@ caption:
     def _normalize_caption(self, caption: str, rubric_id: str) -> str:
         caption = self._sanitize_placeholders(caption.strip())
         caption = self._strip_unicode_emoji(caption)
+        caption = self._remove_ellipsis(caption)
         caption = self._format_caption_layout(caption)
         max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
         hard_max = min(max_len, ABSOLUTE_CAPTION_MAX)
@@ -481,8 +600,53 @@ caption:
 
         return caption
 
+    def _validate_caption_length(self, caption: str, rubric_id: str) -> None:
+        min_len = MEME_CAPTION_MIN if rubric_id == "meme" else REGULAR_CAPTION_MIN
+        if len(caption) < min_len:
+            raise TextGenerationError(f"Caption too short: {len(caption)} chars, need at least {min_len}")
+
+    def _validate_caption_quality(self, caption: str, rubric_id: str) -> None:
+        if rubric_id == "meme":
+            return
+
+        lower = caption.lower()
+        if "..." in caption or "…" in caption:
+            raise TextGenerationError("Caption contains ellipsis")
+
+        hard_hits = [phrase for phrase in HARD_WEAK_CAPTION_PHRASES if phrase in lower]
+        if hard_hits:
+            raise TextGenerationError(f"Caption uses weak template phrase: {hard_hits[0]}")
+
+        weak_hits = [phrase for phrase in WEAK_CAPTION_PHRASES if phrase in lower]
+        if len(weak_hits) >= 2:
+            raise TextGenerationError(f"Caption is too generic: {', '.join(weak_hits[:3])}")
+
+        specificity_hits = [marker for marker in SPECIFICITY_MARKERS if marker in lower]
+        if len(set(specificity_hits)) < 2:
+            raise TextGenerationError("Caption lacks concrete project details")
+
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", caption) if part.strip()]
+        if len(paragraphs) < 4:
+            raise TextGenerationError("Caption needs at least 4 visual blocks")
+
+        if not re.search(r"<b>[^<]{18,}</b>", caption):
+            raise TextGenerationError("Caption needs a meaningful bold hook")
+
+        has_list = bool(re.search(r"^{{(?:one|two|three|four|five|check|dot|growth)}}\s+", caption, re.MULTILINE))
+        has_quote = "<blockquote>" in caption and "</blockquote>" in caption
+        if not has_list:
+            raise TextGenerationError("Caption needs a vertical practical list")
+        if not has_quote:
+            raise TextGenerationError("Caption needs a short blockquote insight")
+
     def _strip_unicode_emoji(self, text: str) -> str:
         return UNICODE_EMOJI_RE.sub("", text)
+
+    def _remove_ellipsis(self, text: str) -> str:
+        text = re.sub(r"\.{3,}", ".", text)
+        text = text.replace("…", ".")
+        text = re.sub(r"\s+\.", ".", text)
+        return text
 
     def _format_caption_layout(self, text: str) -> str:
         text = re.sub(r"[ \t]+", " ", text)
@@ -524,7 +688,10 @@ caption:
             cut = text[: limit - 3].rfind(".")
         if cut < limit // 2:
             cut = limit - 3
-        return text[:cut].rstrip() + "..."
+        result = text[:cut].rstrip(" \n\t.,;:—-")
+        if result and result[-1] not in ".!?":
+            result += "."
+        return result
 
     def _parse_json(self, text: str) -> dict:
         text = re.sub(r"```(?:json)?\s*", "", text)
