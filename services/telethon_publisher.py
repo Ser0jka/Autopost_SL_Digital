@@ -12,6 +12,7 @@ from telethon.tl.types import (
     MessageEntityCustomEmoji,
     MessageEntityItalic,
     MessageEntityStrike,
+    MessageEntityTextUrl,
     MessageEntityUnderline,
 )
 
@@ -22,11 +23,14 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
 CUSTOM_EMOJI_PATH = BASE_DIR / "config" / "custom_emoji.json"
 CAPTION_TOKEN_RE = re.compile(
-    r"<br\s*/?>|</?(?:b|strong|i|em|u|s|strike|code|blockquote)\s*>|\{\{(\w+)\}\}|\{(\w+)\}",
+    r"<br\s*/?>|<a\s+href=[\"'][^\"']+[\"']\s*>|</a\s*>|</?(?:b|strong|i|em|u|s|strike|code|blockquote)\s*>|\{\{(\w+)\}\}|\{(\w+)\}",
     re.IGNORECASE,
 )
+HREF_RE = re.compile(r"href=[\"']([^\"']+)[\"']", re.IGNORECASE)
 
 CUSTOM_EMOJI_ALT = {
+    "{{eyes}}": "\U0001f440",
+    "{{bang}}": "\u203c\ufe0f",
     "{{nut}}": "\U0001f95c",
     "{{waynut}}": "\U0001f95c",
     "{{money}}": "\U0001f4b2",
@@ -58,6 +62,10 @@ CUSTOM_EMOJI_ALT = {
     "{{warning}}": "\u26a0\ufe0f",
     "{{chart}}": "\U0001f4c8",
     "{{gear}}": "\u2699\ufe0f",
+    "{{up}}": "\U0001f53c",
+    "{{hundred}}": "\U0001f4af",
+    "{{smile}}": "\U0001f642",
+    "{{cash}}": "\U0001f4b5",
 }
 
 ENTITY_BY_TAG = {
@@ -115,7 +123,7 @@ def build_caption_entities(caption: str, *, include_custom_emoji: bool = True) -
     emoji_config = _custom_emoji_config()
     result = ""
     entities: list = []
-    open_tags: list[tuple[str, int]] = []
+    open_tags: list[tuple[str, int, str | None]] = []
     pos = 0
 
     for match in CAPTION_TOKEN_RE.finditer(caption):
@@ -130,22 +138,29 @@ def build_caption_entities(caption: str, *, include_custom_emoji: bool = True) -
         if token.startswith("<"):
             closing = token.startswith("</")
             tag = _tag_name(token)
-            if tag not in ENTITY_BY_TAG:
+            if tag not in ENTITY_BY_TAG and tag != "a":
                 pos = match.end()
                 continue
 
             if closing:
                 for index in range(len(open_tags) - 1, -1, -1):
-                    open_tag, offset = open_tags[index]
+                    open_tag, offset, url = open_tags[index]
                     if open_tag != tag:
                         continue
                     del open_tags[index]
                     length = _utf16_len(result) - offset
                     if length > 0:
-                        entities.append(_caption_entity(ENTITY_BY_TAG[tag], offset, length))
+                        if tag == "a" and url:
+                            entities.append(MessageEntityTextUrl(offset=offset, length=length, url=url))
+                        else:
+                            entities.append(_caption_entity(ENTITY_BY_TAG[tag], offset, length))
                     break
             else:
-                open_tags.append((tag, _utf16_len(result)))
+                url = None
+                if tag == "a":
+                    href_match = HREF_RE.search(token)
+                    url = href_match.group(1) if href_match else None
+                open_tags.append((tag, _utf16_len(result), url))
             pos = match.end()
             continue
 
@@ -157,7 +172,7 @@ def build_caption_entities(caption: str, *, include_custom_emoji: bool = True) -
             pos = match.end()
             continue
 
-        alt = CUSTOM_EMOJI_ALT.get(placeholder) or conf.get("alt") or "\u25cc"
+        alt = conf.get("alt") or CUSTOM_EMOJI_ALT.get(placeholder) or "\u25cc"
         offset = _utf16_len(result)
         result += alt
         entities.append(
@@ -172,10 +187,13 @@ def build_caption_entities(caption: str, *, include_custom_emoji: bool = True) -
 
     result += caption[pos:]
     end_offset = _utf16_len(result)
-    for tag, offset in reversed(open_tags):
+    for tag, offset, url in reversed(open_tags):
         length = end_offset - offset
         if length > 0:
-            entities.append(_caption_entity(ENTITY_BY_TAG[tag], offset, length))
+            if tag == "a" and url:
+                entities.append(MessageEntityTextUrl(offset=offset, length=length, url=url))
+            elif tag in ENTITY_BY_TAG:
+                entities.append(_caption_entity(ENTITY_BY_TAG[tag], offset, length))
 
     entities.sort(key=lambda entity: (entity.offset, -entity.length))
     return result, entities
@@ -192,7 +210,7 @@ def render_preview_caption(caption: str) -> str:
     def replace(match: re.Match) -> str:
         name = match.group(1) or match.group(2)
         placeholder = _normalize_placeholder_name(name)
-        return CUSTOM_EMOJI_ALT.get(placeholder) or emoji_config.get(placeholder, {}).get("alt") or ""
+        return emoji_config.get(placeholder, {}).get("alt") or CUSTOM_EMOJI_ALT.get(placeholder) or ""
 
     return _clean_rendered_caption(re.sub(r"\{\{(\w+)\}\}|\{(\w+)\}", replace, caption))
 

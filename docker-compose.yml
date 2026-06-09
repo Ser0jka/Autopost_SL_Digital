@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    container_name: sl-digital-post-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TZ: "${TIMEZONE:-Europe/Moscow}"
+      TELETHON_SESSION_NAME: "/app/data/sessions/sl_digital_user"
+    volumes:
+      - ./data:/app/data

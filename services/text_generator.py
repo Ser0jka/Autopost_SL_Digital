@@ -14,10 +14,10 @@ RUBRICS_PATH = BASE_DIR / "config" / "rubrics.json"
 RUBRIC_SCHEDULE_PATH = BASE_DIR / "config" / "rubric_schedule.json"
 
 FREE_LLM_MODEL_POOL = [
+    "openrouter/owl-alpha",
     "openai/gpt-oss-120b:free",
     "poolside/laguna-m.1:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "openrouter/owl-alpha",
     "openrouter/free",
 ]
 
@@ -27,12 +27,15 @@ REGULAR_CAPTION_MAX = 900
 MEME_CAPTION_MIN = 350
 MEME_CAPTION_MAX = 500
 
-EDITORIAL_SYSTEM_PROMPT = """Ты сильный русскоязычный редактор Telegram-канала IT-агентства.
-Твоя задача - писать живые, профессиональные посты, которые читаются как работа практикующей команды, а не как SEO-дайджест или корпоративная заготовка.
+EDITORIAL_SYSTEM_PROMPT = """Ты сильный русскоязычный редактор Telegram-канала digital-агентства и бизнес-медиа.
+Твоя задача - писать живые, профессиональные посты про бизнес, рост, продажи, продукт, маркетинг, операционку и digital-системы.
+Пиши как практикующая команда, которая видит бизнес целиком: оффер, клиентский путь, процессы, деньги, команду, сервис, аналитику и технологии.
 Пиши конкретно: ситуация, действие, причина, результат. Убирай общие слова, если их нельзя проверить на реальном проекте.
 Сохраняй разметку и placeholders строго по пользовательскому заданию."""
 
 VALID_PLACEHOLDERS = {
+    "{{eyes}}",
+    "{{bang}}",
     "{{nut}}",
     "{{waynut}}",
     "{{money}}",
@@ -64,6 +67,29 @@ VALID_PLACEHOLDERS = {
     "{{warning}}",
     "{{chart}}",
     "{{gear}}",
+    "{{up}}",
+    "{{hundred}}",
+    "{{smile}}",
+    "{{cash}}",
+}
+
+PROMPT_PLACEHOLDERS = {
+    "{{eyes}}",
+    "{{bang}}",
+    "{{money}}",
+    "{{fire}}",
+    "{{up}}",
+    "{{hundred}}",
+    "{{down}}",
+    "{{bolt}}",
+    "{{sparkles}}",
+    "{{smile}}",
+    "{{cash}}",
+    "{{one}}",
+    "{{two}}",
+    "{{three}}",
+    "{{four}}",
+    "{{five}}",
 }
 
 LIST_PLACEHOLDERS = ("one", "two", "three", "four", "five")
@@ -123,6 +149,49 @@ SPECIFICITY_MARKERS = (
     "кабинет",
     "сервер",
     "автоматизац",
+    "оффер",
+    "марж",
+    "прибыл",
+    "выруч",
+    "себестоим",
+    "юнит",
+    "unit",
+    "ltv",
+    "cac",
+    "чек",
+    "повторн",
+    "удержан",
+    "сервис",
+    "скрипт",
+    "регламент",
+    "отдел продаж",
+    "воркфлоу",
+    "команд",
+    "найм",
+    "KPI",
+    "kpi",
+    "план",
+    "ассортимент",
+    "ниш",
+    "позиционирован",
+    "ценообраз",
+)
+
+BUSINESS_ANGLE_POOL = (
+    "оффер и позиционирование",
+    "первый экран и обещание для клиента",
+    "воронка продаж и обработка заявок",
+    "скрипты менеджеров и скорость ответа",
+    "повторные продажи и удержание",
+    "unit-экономика, маржа, средний чек",
+    "упаковка продукта и тарифная сетка",
+    "маркетинговые гипотезы и бюджет",
+    "операционные процессы и регламенты",
+    "сервис, клиентский опыт и доверие",
+    "команда, найм и зоны ответственности",
+    "аналитика, KPI и управленческие решения",
+    "запуск нового направления или MVP",
+    "контент как часть продаж, а не просто охваты",
 )
 
 UNICODE_EMOJI_RE = re.compile(
@@ -198,17 +267,39 @@ class TextGenerator:
             route_name = self._route_name(route)
             try:
                 raw = await self._call_llm(prompt, route)
-                result = self._parse_and_validate(raw, rubric_id)
+                result = await self._parse_validate_or_repair(raw, rubric_id, route, route_name)
                 result["_llm_provider"] = route["provider"]
                 result["_llm_model"] = route["model"]
                 logger.info("Text generated with LLM route: %s", route_name)
                 return result
             except Exception as exc:
-                logger.warning("LLM route failed: %s: %s", route_name, exc)
+                log = logger.info if self._is_soft_llm_route_error(exc) else logger.warning
+                log("LLM route failed: %s: %s", route_name, exc)
                 errors.append(f"{route_name}: {exc}")
 
         detail = "; ".join(errors)
         raise TextGenerationError(f"All text LLM models failed: {detail}")
+
+    async def _parse_validate_or_repair(
+        self,
+        raw: str,
+        rubric_id: str,
+        route: dict[str, str],
+        route_name: str,
+    ) -> dict:
+        last_error: TextGenerationError | None = None
+        for attempt in range(3):
+            try:
+                return self._parse_and_validate(raw, rubric_id)
+            except TextGenerationError as exc:
+                last_error = exc
+                if not self._is_caption_length_error(exc) or attempt == 2:
+                    raise
+                logger.info("Caption length issue with LLM route %s, retrying rewrite: %s", route_name, exc)
+                repair_prompt = self._build_caption_length_repair_prompt(raw, rubric_id, str(exc))
+                raw = await self._call_llm(repair_prompt, route)
+
+        raise last_error or TextGenerationError("Caption repair failed")
 
     async def plan_constructor_cover(
         self,
@@ -219,9 +310,9 @@ class TextGenerator:
         if not available_icons:
             raise TextGenerationError("No constructor icons found")
 
-        prompt = f"""Подбери параметры для локального конструктора обложки Waynut.
+        prompt = f"""Подбери параметры для локального конструктора обложки SL Digital AI.
 
-Доступные иконки, выбери строго одну из списка:
+Доступные фоны из data/background, выбери строго один из списка:
 {", ".join(available_icons)}
 
 Пост:
@@ -234,19 +325,30 @@ caption:
 
 Верни только JSON:
 {{
-  "icon": "одно имя из списка без .png",
-  "title": "короткий заголовок обложки до 32 символов",
-  "subtitle": "подзаголовок до 56 символов"
+  "icon": "одно имя фона из списка без .png",
+  "title": "яркий заголовок обложки до 34 символов",
+  "subtitle": "подзаголовок до 60 символов",
+  "details": ["2-3 коротких тезиса для нижнего блока, каждый до 38 символов"]
 }}
 
 Правила:
-- title должен отражать суть поста и быть читаемым на картинке.
-- subtitle должен раскрывать пользу или конкретику.
+- title должен быть законченной мыслью: 2-5 слов, понятно о чем пост даже без subtitle.
+- title не должен заканчиваться на предлог, союз, тире или голое число. Плохо: "AI-завод креативов за 2". Хорошо: "Креативы без рутины" или "200 креативов в месяц".
+- если используешь число в title, рядом должна быть единица смысла: "за 2 дня", "200 идей в месяц", "5 ошибок в CRM".
+- subtitle должен раскрывать пользу или конкретику, а не повторять title.
 - не используй кавычки, хэштеги и эмодзи в title/subtitle.
-- если тема про продажи или заявки, чаще подходят sales, piplines, handshake.
-- если тема про AI или ботов, чаще подходят ai, idea-bot.
-- если тема про разработку, backend, код или архитектуру, чаще подходят program-monitor, vs-code, servers.
-- если тема про сбои или проблемы, чаще подходят wifi-off, servers.
+- если тема про AI, нейросети или автоматизацию, чаще подходят AI-neural, automatisation-n8n.
+- если тема про разработку, код, backend, MVP или веб-приложения, чаще подходят code-dev-work, terminal-programming-vibe.
+- если тема про маркетинг, рекламу, продажи, упаковку и бизнес, чаще подходят marketing-work-buisness, buisness-promo-ourcorp-logo.
+- если тема про контент, соцсети, Reels, Shorts или YouTube, чаще подходят contentmaker-sells, socialmedia-posts, youtube-feed-noise-tape.
+- если тема про дизайн, визуал или брендинг, чаще подходит design-graphic.
+- если тема про ошибки, хаос или проблемы, чаще подходит mistakes-problems-fuckups.
+- title должен быть более дерзким и живым, но без крика и дешёвого инфобизнеса.
+- subtitle должен звучать как конкретная выгода или интрига.
+- details - это нижний блок "В фокусе": 2-3 коротких пункта, которые добавляют смысла к обложке.
+- details должны быть конкретными и по теме поста: процесс, метрика, инструмент, результат или риск.
+- не повторяй title/subtitle внутри details.
+- не делай details рекламным CTA, длинной фразой или общими словами вроде "качество", "рост", "эффективность".
 """
 
         errors: list[str] = []
@@ -258,11 +360,16 @@ caption:
                 icon = str(result.get("icon", "")).strip()
                 if icon not in available_icons:
                     raise TextGenerationError(f"LLM chose unknown icon: {icon}")
-                title = self._clean_cover_text(str(result.get("title", "")), 42)
-                subtitle = self._clean_cover_text(str(result.get("subtitle", "")), 70)
+                title = self._clean_cover_text(str(result.get("title", "")), 44)
+                subtitle = self._clean_cover_text(str(result.get("subtitle", "")), 72)
+                details = self._clean_cover_details(result.get("details", []), title, subtitle)
+                if not details:
+                    details = self._fallback_cover_details(f"{post.get('topic', '')} {post.get('caption', '')}".lower())
                 if not title:
                     raise TextGenerationError("LLM returned empty title")
-                return {"icon": icon, "title": title, "subtitle": subtitle}
+                if self._is_bad_cover_title(title):
+                    raise TextGenerationError(f"Bad cover title: {title}")
+                return {"icon": icon, "title": title, "subtitle": subtitle, "details": details}
             except Exception as exc:
                 logger.warning("Constructor cover planner failed: %s: %s", route_name, exc)
                 errors.append(f"{route_name}: {exc}")
@@ -273,17 +380,6 @@ caption:
     def _llm_routes(self) -> list[dict[str, str]]:
         routes: list[dict[str, str]] = []
 
-        if (self.config.GROQ_API_KEY or "").strip():
-            for model in self._split_models(self.config.GROQ_MODEL):
-                routes.append(
-                    {
-                        "provider": "groq",
-                        "base_url": self.config.GROQ_BASE_URL,
-                        "api_key": self.config.GROQ_API_KEY,
-                        "model": model,
-                    }
-                )
-
         if (self.config.TEXT_LLM_API_KEY or "").strip():
             for model in self._openrouter_model_pool():
                 routes.append(
@@ -291,6 +387,17 @@ caption:
                         "provider": "openrouter",
                         "base_url": self.config.TEXT_LLM_BASE_URL,
                         "api_key": self.config.TEXT_LLM_API_KEY,
+                        "model": model,
+                    }
+                )
+
+        if (self.config.GROQ_API_KEY or "").strip():
+            for model in self._split_models(self.config.GROQ_MODEL):
+                routes.append(
+                    {
+                        "provider": "groq",
+                        "base_url": self.config.GROQ_BASE_URL,
+                        "api_key": self.config.GROQ_API_KEY,
                         "model": model,
                     }
                 )
@@ -324,32 +431,141 @@ caption:
     def _fallback_constructor_plan(self, post: dict, available_icons: list[str]) -> dict:
         text = f"{post.get('topic', '')} {post.get('caption', '')}".lower()
         rules = [
-            (("продаж", "заяв", "лид", "ворон"), "sales"),
-            (("crm", "pipeline", "ворон"), "piplines"),
-            (("бот", "ai", "нейро", "автомат"), "idea-bot"),
-            (("код", "backend", "архитект", "разработ"), "program-monitor"),
-            (("сервер", "систем", "инфраструкт"), "servers"),
-            (("ошиб", "сбой", "не работает"), "wifi-off"),
-            (("иде", "концепц"), "ai"),
+            (("ai", "нейро", "искусствен", "автомат"), "AI-neural"),
+            (("n8n", "автомат", "процесс", "интеграц"), "automatisation-n8n"),
+            (("код", "backend", "разработ", "mvp", "api", "сайт"), "code-dev-work"),
+            (("терминал", "сервер", "devops"), "terminal-programming-vibe"),
+            (("продаж", "заяв", "лид", "ворон", "реклам", "маркет"), "marketing-work-buisness"),
+            (("бизнес", "упаков", "запуск", "оффер"), "buisness-promo-ourcorp-logo"),
+            (("контент", "reels", "shorts", "соцсет"), "contentmaker-sells"),
+            (("youtube", "видео"), "youtube-feed-noise-tape"),
+            (("дизайн", "визуал", "бренд"), "design-graphic"),
+            (("ошиб", "сбой", "хаос", "проблем"), "mistakes-problems-fuckups"),
         ]
         icon = available_icons[0]
         for keywords, candidate in rules:
             if candidate in available_icons and any(keyword in text for keyword in keywords):
                 icon = candidate
                 break
-        title = self._clean_cover_text(str(post.get("topic", "")), 42) or "IT без хаоса"
-        return {"icon": icon, "title": title, "subtitle": "Решение для роста бизнеса"}
+        title, subtitle = self._fallback_cover_copy(text, str(post.get("topic", "")))
+        details = self._fallback_cover_details(text)
+        return {"icon": icon, "title": title, "subtitle": subtitle, "details": details}
 
     def _clean_cover_text(self, text: str, limit: int) -> str:
         text = re.sub(r"[#\"'`*_{}\[\]]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         text = self._remove_ellipsis(text)
-        if len(text) <= limit:
-            return text
-        cut = text[: limit - 1].rfind(" ")
-        if cut < limit // 2:
-            cut = limit - 1
-        return text[:cut].rstrip(".,:;")
+        if len(text) > limit:
+            cut = text[: limit - 1].rfind(" ")
+            if cut < limit // 2:
+                cut = limit - 1
+            text = text[:cut]
+        text = text.rstrip(".,:;!—- ")
+        text = self._trim_bad_cover_tail(text)
+        return text
+
+    def _trim_bad_cover_tail(self, text: str) -> str:
+        bad_tail = {
+            "за",
+            "для",
+            "без",
+            "и",
+            "или",
+            "в",
+            "во",
+            "на",
+            "с",
+            "со",
+            "по",
+            "от",
+            "до",
+            "к",
+            "ко",
+            "о",
+            "об",
+            "про",
+            "через",
+        }
+        words = text.split()
+        while words:
+            last = words[-1].lower().strip(".,:;!—- ")
+            if last in bad_tail or re.fullmatch(r"\d+", last):
+                words.pop()
+                continue
+            break
+        return " ".join(words).strip()
+
+    def _is_bad_cover_title(self, title: str) -> bool:
+        words = title.split()
+        if len(words) < 2:
+            return True
+        return self._trim_bad_cover_tail(title) != title.strip().rstrip(".,:;!—- ")
+
+    def _clean_cover_details(self, value: object, title: str, subtitle: str) -> list[str]:
+        if isinstance(value, str):
+            raw_items = re.split(r"[\n;]+", value)
+        elif isinstance(value, list):
+            raw_items = [str(item) for item in value]
+        else:
+            raw_items = []
+
+        seen: set[str] = set()
+        forbidden = {title.lower(), subtitle.lower()}
+        details: list[str] = []
+        for item in raw_items:
+            item = self._clean_cover_text(item, 44)
+            key = item.lower()
+            if not item or key in seen or key in forbidden:
+                continue
+            if len(item.split()) < 2:
+                continue
+            details.append(item)
+            seen.add(key)
+            if len(details) >= 3:
+                break
+        return details
+
+    def _fallback_cover_copy(self, text: str, topic: str) -> tuple[str, str]:
+        options = [
+            (("марж", "прибыл", "выруч", "чек", "юнит", "unit"), "Деньги любят систему", "Смотрим на маржу, чек и повторные продажи"),
+            (("сервис", "удержан", "повторн", "лояльн"), "Сервис продает снова", "Повторные покупки дешевле вечной охоты"),
+            (("оффер", "позиционирован", "упаков"), "Оффер без тумана", "Клиент должен понять ценность сразу"),
+            (("команд", "найм", "роль", "ответствен"), "Команда без хаоса", "Роли и процессы важнее лишних созвонов"),
+            (("контент", "креатив", "reels", "shorts", "пост"), "Креативы без рутины", "AI помогает выпускать больше без хаоса"),
+            (("реклам", "трафик", "гипотез"), "Реклама без слива", "Тестируем каналы и масштабируем окупаемое"),
+            (("продаж", "заяв", "лид", "crm", "ворон"), "Заявки без хаоса", "Сайт, бот и CRM работают в одной связке"),
+            (("автомат", "интеграц", "n8n", "процесс"), "Автоматизация без хаоса", "Убираем ручную рутину из процессов"),
+            (("сайт", "лендинг", "веб"), "Сайт ведет к заявке", "Упаковка, форма и аналитика в одной системе"),
+            (("mvp", "прототип", "разработ", "backend", "api"), "MVP без лишнего кода", "Собираем основу, которую можно проверять"),
+            (("дизайн", "бренд", "визуал"), "Визуал работает на смысл", "Делаем интерфейс понятным до первого клика"),
+        ]
+        for keywords, title, subtitle in options:
+            if any(keyword in text for keyword in keywords):
+                return title, subtitle
+
+        cleaned_topic = self._clean_cover_text(topic, 44)
+        if cleaned_topic and not self._is_bad_cover_title(cleaned_topic):
+            return cleaned_topic, "Собираем digital в рабочую систему"
+        return "Digital без хаоса", "Собираем сайт, контент и заявки в систему"
+
+    def _fallback_cover_details(self, text: str) -> list[str]:
+        options = [
+            (("марж", "прибыл", "выруч", "чек", "юнит", "unit"), ["маржа", "средний чек", "повторные продажи"]),
+            (("сервис", "удержан", "повторн", "лояльн"), ["скорость ответа", "доверие", "возврат клиента"]),
+            (("оффер", "позиционирован", "упаков"), ["ценность", "сегмент", "первый экран"]),
+            (("команд", "найм", "роль", "ответствен"), ["роли", "регламенты", "контроль задач"]),
+            (("контент", "креатив", "reels", "shorts", "пост"), ["контент-план", "серии креативов", "быстрые тесты"]),
+            (("реклам", "трафик", "гипотез"), ["гипотезы", "каналы", "окупаемость"]),
+            (("продаж", "заяв", "лид", "crm", "ворон"), ["форма заявки", "CRM-статусы", "контроль лидов"]),
+            (("автомат", "интеграц", "n8n", "процесс"), ["боты", "интеграции", "меньше ручной рутины"]),
+            (("сайт", "лендинг", "веб"), ["структура", "форма заявки", "аналитика"]),
+            (("mvp", "прототип", "разработ", "backend", "api"), ["прототип", "API", "быстрая проверка"]),
+            (("дизайн", "бренд", "визуал"), ["смысл", "интерфейс", "первый экран"]),
+        ]
+        for keywords, details in options:
+            if any(keyword in text for keyword in keywords):
+                return details
+        return ["сайт", "бот", "CRM"]
 
     def _build_prompt(
         self,
@@ -366,6 +582,29 @@ caption:
         max_len = MEME_CAPTION_MAX if is_meme else REGULAR_CAPTION_MAX
         recent_str = "\n".join(f"- {topic}" for topic in recent_topics[-20:]) or "нет"
         topic_block = f"\nТема от админа: {custom_topic}\n" if custom_topic else ""
+        contacts = b.get("contacts", {})
+        telegram_url = contacts.get("telegram", "https://t.me/sl_digital")
+        website_url = contacts.get("website", "")
+        audience = b.get("audience", {})
+        if isinstance(audience, dict):
+            audience_str = "; ".join(
+                f"{key}: {', '.join(value[:8]) if isinstance(value, list) else value}"
+                for key, value in audience.items()
+            )
+        else:
+            audience_str = str(audience)
+        tone = b.get("tone", "")
+        if isinstance(tone, dict):
+            tone_str = f"{tone.get('general', '')}; {', '.join(tone.get('style', []))}"
+            voice_examples = "\n".join(f"- {item}" for item in tone.get("voice_examples", [])[:8])
+        else:
+            tone_str = str(tone)
+            voice_examples = ""
+        services = b.get("services", {})
+        service_directions = ", ".join(services.get("main_directions", [])[:12]) if isinstance(services, dict) else ""
+        content_focus = ", ".join(b.get("content_focus", [])[:14])
+        business_angles = "\n".join(f"- {item}" for item in BUSINESS_ANGLE_POOL)
+        cta_examples = "\n".join(f"- {item}" for item in b.get("cta_examples", [])[:10])
         revision_block = ""
         if revision_request and old_post:
             revision_block = f"""
@@ -385,9 +624,19 @@ caption:
 - слоган: {b["slogan"]}
 - позиционирование: {b["positioning"]}
 - описание: {b["description"]}
-- аудитория: {b["audience"]}
-- тон: {b["tone"]}
+- core idea: {b.get("core_idea", "")}
+- философия: {b.get("brand_philosophy", "")}
+- аудитория: {audience_str}
+- направления: {service_directions}
+- контент-фокус: {content_focus}
+- бизнес-углы, на которые можно выходить шире digital:
+{business_angles}
+- тон: {tone_str}
+- примеры голоса:
+{voice_examples or "- Не отдельные услуги. Полная система роста."}
 - нельзя: {", ".join(b["forbidden"])}
+- Telegram-канал: {telegram_url}
+- сайт: {website_url}
 
 Рубрика:
 - id: {rubric_id}
@@ -408,19 +657,22 @@ caption:
 - Целевой объем caption для обычных рубрик: 750-900 символов. Для meme: 350-500 символов.
 - Не делай короткий пост: лучше 3-4 содержательных абзаца и список, чем 1-2 общие фразы.
 - Абсолютный максимум caption: {ABSOLUTE_CAPTION_MAX} символов.
-- Пиши как человек из команды, который реально разбирает рабочую ситуацию. Не пиши как нейросеть, пресс-релиз, SEO-текст или "дайджест из главных выводов".
+- Пиши как человек из команды SL Digital AI, который реально разбирает рабочую ситуацию. Не пиши как нейросеть, пресс-релиз, SEO-текст или "дайджест из главных выводов".
+- Тон должен быть ярче и увереннее: чуть дерзко, бизнесово, с сильным хуком, но без дешёвого инфобизнеса и без обещаний "миллиона заявок".
 - В каждом посте должна быть конкретика: сценарий, процесс, решение, критерий, ошибка, метрика, ограничение или практический вывод. Общие фразы без действия запрещены.
 - Не начинай с "Мы собрали", "Внедрение IT-решений - это", "5 ключевых мыслей", "IT-решения помогают бизнесу". Это звучит скудно.
 - Не используй формулировки "бизнесы часто сталкиваются", "наша команда имеет опыт", "важно правильно выбрать технологии", если дальше нет конкретного действия или примера.
-- Перед написанием внутренне выбери один угол поста: рабочий процесс, ошибка клиента, запуск MVP, автоматизация заявки, интеграция CRM, снижение ручной работы, проверка гипотезы, метрика, ограничение проекта. В JSON этот угол отдельно не выводи, но весь caption строй вокруг него.
-- В тексте должен быть хотя бы один конкретный артефакт: прототип, API, CRM, форма заявки, бот, кабинет, метрика, мокап, сценарий пользователя, интеграция, таблица, воронка, заявка, менеджер.
+- Можно использовать сильные формулы: "Хватит чинить симптомы", "Сайт без системы не продаёт", "Заявки не должны жить в хаосе", "Контент должен работать как воронка".
+- Перед написанием внутренне выбери один угол поста из digital или широкого бизнеса: оффер, продажи, операционка, маркетинг, продукт, сервис, финансы, команда, аналитика, запуск, удержание, автоматизация. В JSON этот угол отдельно не выводи, но весь caption строй вокруг него.
+- Не своди каждый пост к AI, ботам и CRM. Технологии должны быть инструментом, а не единственной темой.
+- В тексте должен быть хотя бы один конкретный бизнес-артефакт: оффер, тариф, средний чек, маржа, LTV, CAC, скрипт продаж, регламент, KPI, форма заявки, CRM, бот, сайт, кабинет, метрика, сценарий клиента, таблица, воронка, менеджер, повторная продажа.
 - Не перечисляй абстрактные преимущества. Покажи, что именно команда делает руками и зачем.
 - Пиши фразами средней длины. Не делай подряд 5 коротких лозунгов и не делай длинные канцелярские предложения.
 - Не используй многоточия вообще и не ставь три точки подряд. Каждый абзац должен выглядеть завершенным.
-- Для premium emoji используй только эти placeholders: {", ".join(sorted(VALID_PLACEHOLDERS))}.
+- Для premium emoji используй только эти placeholders: {", ".join(sorted(PROMPT_PLACEHOLDERS))}.
 - Не используй обычные Unicode emoji вообще. Только placeholders для premium emoji. Если подходящего placeholder нет, пиши без emoji.
 - Используй 3-7 placeholders, но не перегружай текст.
-- Для форматирования используй только HTML-теги: <b>жирный</b>, <i>курсив</i>, <u>подчеркнутый</u>, <s>зачеркнутый</s>, <code>код</code>, <blockquote>цитата</blockquote>.
+- Для форматирования используй только HTML-теги: <b>жирный</b>, <i>курсив</i>, <u>подчеркнутый</u>, <s>зачеркнутый</s>, <code>код</code>, <blockquote>цитата</blockquote>, <a href="{telegram_url}">текст ссылки</a>.
 - Не используй Markdown-оформление: **жирный**, __жирный__, `код`, > цитата.
 - Оформляй caption красиво для Telegram: сильный первый хук, короткие абзацы, 3-4 смысловых блока, список из 3-4 пунктов, короткий вывод и мягкий CTA.
 - Первый хук выделяй через <b>текст хука</b>. Внутри хука должна быть конкретная идея, а не название темы.
@@ -436,7 +688,10 @@ caption:
 - После placeholder не ставь точку, двоеточие или тире. Пиши так: {{check}} текст пункта.
 - Пункты списка делай короткими: 3-9 слов на пункт, без длинных сложных предложений.
 - Не начинай CTA с {{dot}} или точки. CTA должен быть отдельным коротким абзацем.
-- В конце добавляй мягкий CTA Waynut: @Waynut_Contact, сообщения каналу или info@waynut.ru, когда это уместно.
+- CTA должен быть сильнее обычного: "Хочешь так же?", "Пора собрать систему?", "Хватит терять заявки?".
+- В самом низу добавляй фирменную подписку отдельной строкой:
+  {{eyes}} <a href="{telegram_url}">SL Digital - Подписаться</a>
+- Перед строкой подписки поставь короткий CTA-абзац. Не дублируй ссылку на канал в других местах.
 - Не пиши отдельное поле с текстом поста, только caption.
 - image_prompt должен быть короткой темой/метафорой для обложки, а не полным техническим промптом.
 - В image_prompt опиши, что именно должен символизировать главный 3D-объект.
@@ -446,23 +701,27 @@ caption:
 2. Абзац контекста: что происходит в бизнесе/проекте и почему это важно.
 3. Список: 3-4 практических шага, решения или наблюдения.
 4. <blockquote>Короткий вывод</blockquote>
-5. Финальный абзац: что получает бизнес / как Waynut подходит к задаче.
-6. CTA: коротко, без давления.
+5. Финальный абзац: что получает бизнес / как SL Digital AI собирает задачу в систему.
+6. CTA: ярко, коротко, без дешёвого давления.
+7. Фирменная строка подписки ссылкой на канал.
 
 Выбирай одну из композиционных формул:
 - "ситуация -> как делаем -> почему так -> результат";
 - "ошибка -> чем опасна -> как исправить -> что проверить";
 - "гипотеза -> быстрый прототип -> тест -> решение";
 - "хаос в процессе -> связка инструментов -> прозрачная воронка";
-- "ручная работа -> автоматизация -> контроль -> экономия времени".
+- "ручная работа -> автоматизация -> контроль -> экономия времени";
+- "оффер -> трафик -> заявка -> продажа -> повторная покупка";
+- "маржа -> процессы -> контроль -> рост без лишнего найма";
+- "клиентский путь -> точки потерь -> решение -> метрика".
 
 Перед финальным JSON мысленно проверь caption:
 - есть ли живой хук, который хочется дочитать;
 - есть ли конкретный проектный процесс, а не общие обещания;
 - список стоит столбиком;
 - quote звучит как вывод, а не как рекламный слоган;
-- CTA не давит и не повторяет весь пост;
-- текст похож на пост опытной команды Waynut.
+- CTA звучит уверенно и не повторяет весь пост;
+- текст похож на пост опытной команды SL Digital AI.
 
 Пример уровня оформления и живости, к которому нужно стремиться:
 <b>Тестируем MVP за 72 часа - как это реально?</b>
@@ -477,7 +736,9 @@ caption:
 
 Так за 3 дня появляется не "красивая идея", а набор метрик: что подтвердилось, где пользователю непонятно и что стоит дорабатывать дальше.
 
-Готовы проверить идею в таком темпе? Напишите @Waynut_Contact или info@waynut.ru.
+Хочешь так же быстро проверить идею, а не спорить о ней месяцами? Пиши нам.
+
+{{eyes}} <a href="{telegram_url}">SL Digital - Подписаться</a>
 
 Верни JSON строго такой формы:
 {{
@@ -485,8 +746,8 @@ caption:
   "caption": "готовый caption для Telegram",
   "image_prompt": "тема и метафора для обложки, 1-2 предложения",
   "premium_emoji_plan": [
-    {{"placeholder": "{{{{nut}}}}", "meaning": "бренд Waynut"}},
-    {{"placeholder": "{{{{check}}}}", "meaning": "результат"}}
+    {{"placeholder": "{{{{eyes}}}}", "meaning": "акцент внимания"}},
+    {{"placeholder": "{{{{fire}}}}", "meaning": "сильный вывод"}}
   ],
   "short_summary": "1-2 предложения о посте"
 }}"""
@@ -505,7 +766,7 @@ caption:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.9,
-            "max_tokens": 1800,
+            "max_tokens": 2200,
             "response_format": {"type": "json_object"},
         }
 
@@ -550,10 +811,14 @@ caption:
             )
         if not content:
             finish_reason = data.get("choices", [{}])[0].get("finish_reason")
-            logger.error("LLM returned empty content. finish_reason=%s response=%s", finish_reason, data)
-            raise TextGenerationError(
-                "LLM returned empty content. Check TEXT_LLM_MODEL or try another model."
+            reasoning = message.get("reasoning") or message.get("reasoning_details") or ""
+            logger.info(
+                "LLM returned empty final content. model=%s finish_reason=%s reasoning_preview=%s",
+                data.get("model", model),
+                finish_reason,
+                str(reasoning)[:240],
             )
+            raise TextGenerationError("LLM returned empty final content")
 
         return str(content).strip()
 
@@ -588,22 +853,63 @@ caption:
         caption = self._strip_unicode_emoji(caption)
         caption = self._remove_ellipsis(caption)
         caption = self._format_caption_layout(caption)
-        max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
-        hard_max = min(max_len, ABSOLUTE_CAPTION_MAX)
-
-        if len(caption) > hard_max:
-            logger.warning("Caption length %s > %s, truncating", len(caption), hard_max)
-            caption = self._truncate(caption, hard_max)
-
-        if len(caption) > ABSOLUTE_CAPTION_MAX:
-            caption = self._truncate(caption, ABSOLUTE_CAPTION_MAX)
-
         return caption
 
     def _validate_caption_length(self, caption: str, rubric_id: str) -> None:
         min_len = MEME_CAPTION_MIN if rubric_id == "meme" else REGULAR_CAPTION_MIN
+        max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
         if len(caption) < min_len:
             raise TextGenerationError(f"Caption too short: {len(caption)} chars, need at least {min_len}")
+        if len(caption) > max_len:
+            raise TextGenerationError(f"Caption too long: {len(caption)} chars, need at most {max_len}")
+        if len(caption) > ABSOLUTE_CAPTION_MAX:
+            raise TextGenerationError(f"Caption too long: {len(caption)} chars, absolute max {ABSOLUTE_CAPTION_MAX}")
+
+    def _is_caption_length_error(self, exc: Exception) -> bool:
+        message = str(exc)
+        return message.startswith("Caption too short:") or message.startswith("Caption too long:")
+
+    def _is_soft_llm_route_error(self, exc: Exception) -> bool:
+        message = str(exc)
+        return message.startswith("LLM returned empty final content")
+
+    def _build_caption_length_repair_prompt(self, raw_json: str, rubric_id: str, reason: str) -> str:
+        min_len = MEME_CAPTION_MIN if rubric_id == "meme" else REGULAR_CAPTION_MIN
+        max_len = MEME_CAPTION_MAX if rubric_id == "meme" else REGULAR_CAPTION_MAX
+        target = "850-900" if rubric_id != "meme" else "420-500"
+        action = (
+            "сожми текст, сохранив самые сильные мысли, конкретику, список, blockquote и CTA"
+            if "too long" in reason
+            else "расширь текст конкретикой без воды"
+        )
+        return f"""Предыдущий ответ почти подходит, но caption не попал в нужную длину: {reason}.
+
+Твоя задача - доработать именно этот JSON, не начинать с нуля.
+
+Предыдущий JSON:
+{raw_json}
+
+Верни только JSON той же формы:
+{{
+  "topic": "...",
+  "caption": "...",
+  "image_prompt": "...",
+  "premium_emoji_plan": [...],
+  "short_summary": "..."
+}}
+
+Правила доработки:
+- caption должен быть {min_len}-{max_len} символов, абсолютный максимум {ABSOLUTE_CAPTION_MAX}.
+- Целься в {target} символов.
+- Главная операция: {action}.
+- Сохрани тему, направление мысли, HTML-разметку и premium emoji placeholders.
+- Не используй обычные Unicode emoji.
+- Не используй многоточия.
+- Добавь конкретики: процесс, артефакт, список или вывод из проекта.
+- Не добавляй воду и общие фразы.
+- Если исходник длинный, не обрезай механически: перепиши плотнее, убери повторы и оставь лучшие формулировки.
+- Сохрани красивую Telegram-структуру: хук, контекст, список, blockquote, CTA, строка подписки.
+"""
 
     def _validate_caption_quality(self, caption: str, rubric_id: str) -> None:
         if rubric_id == "meme":

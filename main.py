@@ -151,16 +151,17 @@ async def main() -> None:
     ) -> tuple[str, str]:
         icons = list_constructor_icons()
         if not icons:
-            raise RuntimeError("No PNG icons found in data/icons")
+            raise RuntimeError("No PNG backgrounds found in data/background")
 
         plan_data = await text_generator.plan_constructor_cover(post_data, icons, request=request)
         plan = ConstructorPlan(
             icon=plan_data["icon"],
             title=plan_data["title"],
             subtitle=plan_data.get("subtitle", ""),
+            details=plan_data.get("details", []),
         )
         image_path = build_constructor_image(post_id, plan)
-        return image_path, f"constructor:{plan.icon}"
+        return image_path, f"constructor_background:{plan.icon}"
 
     async def generate_post_for_review(
         rubric_id: str,
@@ -485,7 +486,7 @@ async def main() -> None:
 
         await bot.send_message(
             admin_chat_id,
-            "Собираю картинку-конструктор: выбираю иконку, заголовок и подзаголовок...",
+            "Собираю картинку-конструктор: выбираю фон, заголовок и подзаголовок...",
         )
         try:
             image_path, image_provider = await build_constructor_image_for_post_data(

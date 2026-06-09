@@ -1,19 +1,19 @@
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ICONS_DIR = BASE_DIR / "data" / "icons"
+BACKGROUND_DIR = BASE_DIR / "data" / "background"
 FONT_DIR = BASE_DIR / "data" / "font"
-LOGO_PATH = BASE_DIR / "data" / "Waynut.png"
 IMAGE_DIR = BASE_DIR / "data" / "images"
 
 WIDTH = 1080
 HEIGHT = 1080
-ORANGE = (255, 151, 31)
-GRAPHITE = (35, 35, 35)
+WHITE = (255, 255, 255)
+SOFT_WHITE = (222, 224, 224)
+MUTED_WHITE = (190, 194, 194)
+ACCENT = (255, 151, 31)
 
 
 @dataclass
@@ -21,114 +21,136 @@ class ConstructorPlan:
     icon: str
     title: str
     subtitle: str
+    details: list[str] = field(default_factory=list)
 
 
 def list_constructor_icons() -> list[str]:
-    if not ICONS_DIR.exists():
+    if not BACKGROUND_DIR.exists():
         return []
-    return sorted(path.stem for path in ICONS_DIR.glob("*.png"))
+    return sorted(path.stem for path in BACKGROUND_DIR.glob("*.png"))
 
 
 def build_constructor_image(post_id: str, plan: ConstructorPlan) -> str:
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    image = _gradient_background(WIDTH, HEIGHT)
-    draw = ImageDraw.Draw(image)
+    image = _background_image(plan.icon)
 
-    _draw_soft_waves(image)
-    _draw_text_block(draw, plan.title, plan.subtitle)
-    _paste_logo(image)
-    _paste_icon_scene(image, plan.icon)
+    _draw_readability_layer(image)
+    _draw_text_block(image, plan.title, plan.subtitle)
+    _draw_details_block(image, plan.details)
 
     out_path = IMAGE_DIR / f"{post_id}_constructor.png"
     image.save(out_path, "PNG", optimize=True)
     return str(out_path)
 
 
-def _gradient_background(width: int, height: int) -> Image.Image:
-    top = (255, 252, 244)
-    mid = (255, 235, 188)
-    bottom = (255, 168, 65)
-    img = Image.new("RGBA", (width, height), top)
-    pixels = img.load()
-    for y in range(height):
-        t = y / max(1, height - 1)
-        if t < 0.55:
-            local = t / 0.55
-            color = _mix(top, mid, local)
-        else:
-            local = (t - 0.55) / 0.45
-            color = _mix(mid, bottom, local)
-        for x in range(width):
-            pixels[x, y] = (*color, 255)
-    return img
+def _background_image(background_name: str) -> Image.Image:
+    path = BACKGROUND_DIR / f"{background_name}.png"
+    if not path.exists():
+        backgrounds = list_constructor_icons()
+        path = BACKGROUND_DIR / f"{backgrounds[0]}.png" if backgrounds else None
+    if not path or not path.exists():
+        return Image.new("RGBA", (WIDTH, HEIGHT), (14, 14, 14, 255))
+
+    source = Image.open(path).convert("RGBA")
+    scale = max(WIDTH / source.width, HEIGHT / source.height)
+    resized = source.resize((int(source.width * scale), int(source.height * scale)), Image.LANCZOS)
+    left = (resized.width - WIDTH) // 2
+    top = (resized.height - HEIGHT) // 2
+    return resized.crop((left, top, left + WIDTH, top + HEIGHT))
 
 
-def _draw_soft_waves(image: Image.Image) -> None:
+def _draw_readability_layer(image: Image.Image) -> None:
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    for idx, alpha in enumerate((26, 18, 14)):
-        y = 720 + idx * 54
-        points = []
-        for x in range(-100, WIDTH + 101, 30):
-            wave = math.sin((x / 150) + idx) * 30
-            points.append((x, y + wave))
-        points += [(WIDTH + 100, HEIGHT + 100), (-100, HEIGHT + 100)]
-        draw.polygon(points, fill=(255, 255, 255, alpha))
-    image.alpha_composite(overlay.filter(ImageFilter.GaussianBlur(18)))
+    draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0, 24))
+    draw.rectangle((0, 0, WIDTH, 410), fill=(0, 0, 0, 64))
+    draw.rectangle((0, 740, WIDTH, HEIGHT), fill=(0, 0, 0, 46))
+    draw.ellipse((-260, -260, 1020, 520), fill=(0, 0, 0, 86))
+    image.alpha_composite(overlay.filter(ImageFilter.GaussianBlur(42)))
 
 
-def _draw_text_block(draw: ImageDraw.ImageDraw, title: str, subtitle: str) -> None:
+def _draw_text_block(image: Image.Image, title: str, subtitle: str) -> None:
+    draw = ImageDraw.Draw(image)
     x = 76
-    y = 82
-    max_width = 720
-    text_bottom_limit = 430
-    title_font = _fit_font(draw, title, "VelaSans-ExtraBold.ttf", 86, 58, max_width, max_lines=2)
-    subtitle_font = _fit_font(draw, subtitle, "VelaSans-Regular.ttf", 44, 34, max_width, max_lines=2)
+    y = 86
+    max_width = 860
+    text_bottom_limit = 392
+    title_font = _fit_font(draw, title, "Unbounded-Bold.ttf", 68, 40, max_width, max_lines=2)
+    subtitle_font = _fit_font(draw, subtitle, "Gilroy-Light_0.ttf", 38, 28, max_width, max_lines=2)
 
     title_lines = _wrap_text(draw, title, title_font, max_width, max_lines=2)
     for line in title_lines:
-        draw.text((x, y), line, font=title_font, fill=ORANGE)
-        y += int(title_font.size * 1.08)
+        _draw_clean_text(image, (x, y), line, title_font, WHITE)
+        y += int(title_font.size * 1.12)
 
-    y += 28
+    y += 24
     subtitle_lines = _wrap_text(draw, subtitle, subtitle_font, max_width, max_lines=2)
     for line in subtitle_lines:
         if y + subtitle_font.size > text_bottom_limit:
             break
-        draw.text((x, y), line, font=subtitle_font, fill=GRAPHITE)
-        y += int(subtitle_font.size * 1.12)
+        _draw_clean_text(image, (x, y), line, subtitle_font, SOFT_WHITE)
+        y += int(subtitle_font.size * 1.24)
 
 
-def _paste_logo(image: Image.Image) -> None:
-    if not LOGO_PATH.exists():
-        draw = ImageDraw.Draw(image)
-        draw.text((870, 72), "Waynut", font=_font("VelaSans-Bold.ttf", 34), fill=(20, 20, 20))
-        return
-    logo = Image.open(LOGO_PATH).convert("RGBA")
-    target_w = 132
-    ratio = target_w / logo.width
-    logo = logo.resize((target_w, int(logo.height * ratio)), Image.LANCZOS)
-    image.alpha_composite(logo, (WIDTH - target_w - 72, 72))
-
-
-def _paste_icon_scene(image: Image.Image, icon_name: str) -> None:
-    icon_path = ICONS_DIR / f"{icon_name}.png"
-    if not icon_path.exists():
-        icons = list_constructor_icons()
-        icon_path = ICONS_DIR / f"{icons[0]}.png" if icons else None
-    if not icon_path or not icon_path.exists():
+def _draw_details_block(image: Image.Image, details: list[str]) -> None:
+    details = [item.strip() for item in details if item and item.strip()][:3]
+    if not details:
         return
 
-    icon = Image.open(icon_path).convert("RGBA")
-    icon_zone_top = 470
-    icon_zone_bottom = 1010
-    max_w, max_h = 660, icon_zone_bottom - icon_zone_top
-    scale = min(max_w / icon.width, max_h / icon.height)
-    icon = icon.resize((int(icon.width * scale), int(icon.height * scale)), Image.LANCZOS)
+    draw = ImageDraw.Draw(image)
+    panel_x = 56
+    panel_y = 782
+    content_x = 76
+    label_y = 804
+    bullet_x = content_x + 5
+    text_x = content_x + 30
+    list_y = 856
+    max_width = 820
+    label_font = _font("Gilroy-Semibold_0.ttf", 26)
+    text_font = _fit_font(draw, " ".join(details), "Gilroy-Light_0.ttf", 31, 24, max_width - 42, max_lines=3)
+    line_gap = int(text_font.size * 1.38)
+    block_h = 72 + line_gap * len(details)
+    block_w = 880
 
-    x = (WIDTH - icon.width) // 2
-    y = icon_zone_top + ((icon_zone_bottom - icon_zone_top) - icon.height) // 2
-    image.alpha_composite(icon, (x, y))
+    panel = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    panel_draw = ImageDraw.Draw(panel)
+    panel_draw.rounded_rectangle(
+        (panel_x, panel_y, panel_x + block_w, panel_y + block_h),
+        radius=22,
+        fill=(0, 0, 0, 112),
+    )
+    image.alpha_composite(panel)
+
+    _draw_clean_text(image, (content_x, label_y), "В фокусе", label_font, MUTED_WHITE)
+
+    y = list_y
+    for detail in details:
+        lines = _wrap_text(draw, detail, text_font, max_width - 42, max_lines=1)
+        if not lines:
+            continue
+        line = lines[0]
+        bbox = draw.textbbox((text_x, y), line, font=text_font)
+        center_y = (bbox[1] + bbox[3]) // 2
+        radius = 5
+        draw.ellipse(
+            (bullet_x - radius, center_y - radius, bullet_x + radius, center_y + radius),
+            fill=ACCENT,
+        )
+        _draw_clean_text(image, (text_x, y), line, text_font, SOFT_WHITE)
+        y += line_gap
+
+
+def _draw_clean_text(
+    image: Image.Image,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+) -> None:
+    draw = ImageDraw.Draw(image)
+    x, y = xy
+    draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 64))
+    draw.text((x, y), text, font=font, fill=fill)
 
 
 def _font(name: str, size: int) -> ImageFont.FreeTypeFont:
@@ -179,8 +201,12 @@ def _wrap_text(
         lines.append(current)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
-    if len(lines) == max_lines and len(" ".join(words)) > len(" ".join(lines)):
-        lines[-1] = lines[-1].rstrip(".,:;")
+    original = " ".join(words)
+    rendered = " ".join(lines)
+    if len(lines) == max_lines and len(original) > len(rendered):
+        while words and len(" ".join(words)) > len(rendered):
+            words.pop()
+        return _wrap_text(draw, " ".join(words).rstrip(".,:;"), font, max_width, max_lines)
     return lines or ["IT без хаоса"]
 
 
